@@ -8,7 +8,6 @@ services:
     startCommand: uvicorn autosoc.web.app:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
     healthCheckPath: /healthz
     autoDeployTrigger: commit
-    maxShutdownDelaySeconds: 60
     envVars:
       - key: AUTOSOC_ENABLE_LIVE_PROVIDERS
         value: "false"

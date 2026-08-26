@@ -45,6 +45,7 @@ class DeploymentManifestTests(unittest.TestCase):
         self.assertNotIn("ABUSEIPDB_API_KEY", blueprint)
         self.assertNotIn("OPENAI_API_KEY", blueprint)
         self.assertNotIn("AUTOSOC_WEB_PASSWORD", blueprint)
+        self.assertNotIn("maxShutdownDelaySeconds", blueprint)
         self.assertNotRegex(blueprint, r"(?i)\bsk-[a-z0-9_-]+")
 
 
