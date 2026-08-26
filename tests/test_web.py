@@ -79,6 +79,14 @@ class WebDashboardTests(unittest.TestCase):
         self.assertIn("Artifact generated · commands not executed", response.text)
         self.assertIn("PENDING HUMAN APPROVAL", response.text)
         self.assertIn("tailwindcss.com", response.text)
+        self.assertIn("hosting firewall blocked this batch", response.text)
+
+        # Keep the hosted demo representative without batching multiple SQLi
+        # signatures into one request, which managed perimeter WAFs may reject.
+        self.assertIn("UNION%20SELECT", response.text)
+        self.assertIn('"tls_version":"SSLv3"', response.text)
+        self.assertIn('"request_path":"/health"', response.text)
+        self.assertNotIn("password=%27%20OR%201%3D1", response.text)
 
     def test_healthz_is_fixed_auth_exempt_and_provider_free(self) -> None:
         with (

@@ -189,7 +189,6 @@
                 aria-describedby="raw-log-help inputError"
                 class="scrollbar-thin w-full resize-y rounded-xl border border-white/[0.09] bg-[#090d12] px-3.5 py-3 font-mono text-[11px] leading-[1.7] text-slate-300 outline-none transition placeholder:text-slate-700 focus:border-signal-blue/50 focus:ring-2 focus:ring-signal-blue/10"
               >{"timestamp":"2026-08-27T09:00:00Z","event_type":"web_access","source_ip":"198.51.100.21","method":"GET","request_path":"/catalog?id=7%20UNION%20SELECT%20username,password%20FROM%20users--","status":403,"tls_version":"TLSv1.3"}
-{"timestamp":"2026-08-27T09:00:05Z","event_type":"web_access","source_ip":"203.0.113.32","method":"POST","request_path":"/login","request_body":"user=admin&password=%27%20OR%201%3D1--","status":401,"tls_version":"TLSv1.2"}
 {"timestamp":"2026-08-27T09:01:00Z","event_type":"tls_handshake","source_ip":"192.0.2.41","destination_ip":"10.20.0.20","tls_version":"SSLv3","cipher":"TLS_RSA_WITH_RC4_128_MD5"}
 {"timestamp":"2026-08-27T09:05:00Z","event_type":"web_access","source_ip":"10.20.5.10","method":"GET","request_path":"/health","status":200,"tls_version":"TLSv1.3"}</textarea>
               <p id="raw-log-help" class="mt-2 text-[11px] leading-5 text-slate-500">
@@ -937,6 +936,12 @@
           try {
             payload = await response.json();
           } catch (_error) {
+            if (response.status === 403) {
+              throw new Error(
+                "The hosting firewall blocked this batch because it contains multiple attack signatures. " +
+                "Analyze one signature at a time here, or use the local CLI/Docker deployment for full simulations."
+              );
+            }
             throw new Error(response.ok ? "The server returned invalid JSON." : `Server request failed with status ${response.status}.`);
           }
 
