@@ -1,0 +1,89 @@
+flowchart TB
+    subgraph INPUT["Untrusted input"]
+        JSON["JSON / JSONL logs"]
+        ACCESS["Apache / Nginx access logs"]
+    end
+
+    subgraph TIER1["Tier 1 — Deterministic ingestion, detection, and enrichment"]
+        PARSER["Normalize and validate\nSecurityEvent"]
+        SQLI["SQLi rules\nURL decode + regex"]
+        TLS["Weak-TLS rules\nprotocol and cipher deny-lists"]
+        FINDING["DetectionFinding\nevidence + confidence + ATT&CK"]
+        BASE["Transparent base score\nseverity + confidence"]
+        IPGATE{"Global unicast IP\nand API key available?"}
+        ABUSE["AbuseIPDB check\nasync httpx client"]
+        MOCK["Labeled mock result\nno external request"]
+        RESCORE["Deterministic re-score\nIP reputation contribution"]
+        REPORT["Validated IncidentReport\ndecision trace + provenance"]
+    end
+
+    subgraph TIER2["Tier 2 — LangGraph agent workflow"]
+        START((START))
+        STATE["AgentState\nreport + messages + playbook"]
+        TRIAGE["Triage node\nprioritize existing findings"]
+        INTEL["Intel node\nreview TI provenance + ATT&CK"]
+        RESPONSE["Response node\nselect response focus"]
+        END((END))
+    end
+
+    subgraph GUARDS["Grounding and availability guardrails"]
+        PACKET["Bounded fact packet\nraw_log excluded"]
+        SELECT["Schema + allow-list validation\nIDs, IPs, mappings, enums only"]
+        LLM["Optional ChatOpenAI\nfact selection only"]
+        LOCAL["Deterministic local fallback"]
+        RENDER["Deterministic Python renderer\ncommands are not model-authored"]
+    end
+
+    subgraph APPROVAL["Human-in-the-loop boundary"]
+        PLAYBOOK["DRY RUN / PREVIEW ONLY\nPENDING HUMAN APPROVAL"]
+        HUMAN{"Named human approver\nvalidates scope and impact"}
+        EXTERNAL["Approved change workflow\noutside AutoSOC"]
+        REJECT["Reject, revise, or monitor"]
+    end
+
+    JSON --> PARSER
+    ACCESS --> PARSER
+    PARSER --> SQLI
+    PARSER --> TLS
+    SQLI --> FINDING
+    TLS --> FINDING
+    FINDING --> BASE --> IPGATE
+    IPGATE -- "yes" --> ABUSE
+    IPGATE -- "no / offline / failure" --> MOCK
+    ABUSE --> RESCORE
+    MOCK --> RESCORE
+    RESCORE --> REPORT
+    PARSER -. "zero findings" .-> REPORT
+
+    REPORT --> STATE
+    STATE -. "initializes and receives updates" .-> START
+    START --> TRIAGE --> INTEL --> RESPONSE --> END
+    STATE -. "validated report" .-> TRIAGE
+    STATE -. "reduced messages" .-> INTEL
+    STATE -. "report + prior context" .-> RESPONSE
+    REPORT --> PACKET
+    PACKET --> TRIAGE
+    PACKET --> INTEL
+    PACKET --> RESPONSE
+    LLM --> SELECT
+    LOCAL --> SELECT
+    SELECT --> TRIAGE
+    SELECT --> INTEL
+    SELECT --> RESPONSE
+    RESPONSE -. "invokes inside node" .-> RENDER
+
+    RENDER --> PLAYBOOK --> HUMAN
+    HUMAN -- "approved" --> EXTERNAL
+    HUMAN -- "not approved" --> REJECT
+
+    classDef deterministic fill:#dff7e5,stroke:#207a3c,color:#102a18,stroke-width:2px;
+    classDef agent fill:#e7efff,stroke:#2855a5,color:#102044,stroke-width:2px;
+    classDef guard fill:#fff3cd,stroke:#9a6b00,color:#3b2b00,stroke-width:2px;
+    classDef danger fill:#fde2e2,stroke:#a61b1b,color:#4a0d0d,stroke-width:2px;
+    classDef external fill:#f2e8ff,stroke:#7040a0,color:#2c1742,stroke-width:2px;
+
+    class PARSER,SQLI,TLS,FINDING,BASE,IPGATE,ABUSE,MOCK,RESCORE,REPORT deterministic;
+    class START,STATE,TRIAGE,INTEL,RESPONSE,END agent;
+    class PACKET,SELECT,LLM,LOCAL,RENDER guard;
+    class PLAYBOOK,HUMAN,REJECT danger;
+    class EXTERNAL external;

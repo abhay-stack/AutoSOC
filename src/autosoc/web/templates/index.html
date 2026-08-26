@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="en" class="h-full bg-[#080b0e]">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta
+    name="description"
+    content="AutoSOC local incident triage and approval-gated containment workbench."
+  >
+  <title>AutoSOC · Incident Workbench</title>
+  <link
+    rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d1117'/%3E%3Cpath d='M32 10 15 17v14c0 11 7 20 17 25 10-5 17-14 17-25V17L32 10Z' fill='none' stroke='%237aa2d6' stroke-width='4'/%3E%3C/svg%3E"
+  >
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            graphite: {
+              950: "#080b0e",
+              900: "#0d1117",
+              850: "#11171e",
+              800: "#17202a"
+            },
+            signal: {
+              amber: "#f4b860",
+              red: "#ef6f6c",
+              green: "#66c89f",
+              blue: "#7aa2d6"
+            }
+          },
+          fontFamily: {
+            sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+            mono: ["SFMono-Regular", "Cascadia Code", "Roboto Mono", "monospace"]
+          },
+          boxShadow: {
+            console: "0 24px 80px rgba(0, 0, 0, 0.34)",
+            amber: "0 0 0 1px rgba(244,184,96,.18), 0 16px 48px rgba(0,0,0,.28)"
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    body {
+      background:
+        radial-gradient(circle at 8% 0%, rgba(122, 162, 214, 0.09), transparent 31rem),
+        radial-gradient(circle at 92% 8%, rgba(244, 184, 96, 0.055), transparent 28rem),
+        #080b0e;
+    }
+
+    .console-grid {
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+
+    .scrollbar-thin {
+      scrollbar-color: #384555 transparent;
+      scrollbar-width: thin;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar {
+      height: 8px;
+      width: 8px;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar-thumb {
+      background: #384555;
+      border-radius: 999px;
+    }
+
+    .risk-ring {
+      background: conic-gradient(
+        var(--risk-color, #7aa2d6) calc(var(--risk-value, 0) * 1%),
+        #202a35 0
+      );
+    }
+
+    .loading-scan::after {
+      animation: scan 1.8s ease-in-out infinite;
+      background: linear-gradient(90deg, transparent, rgba(122, 162, 214, 0.34), transparent);
+      content: "";
+      inset: 0;
+      position: absolute;
+      transform: translateX(-100%);
+    }
+
+    @keyframes scan {
+      100% { transform: translateX(100%); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body class="min-h-full font-sans text-slate-200 antialiased selection:bg-signal-blue/30">
+  <div class="console-grid min-h-screen">
+    <header class="border-b border-white/[0.07] bg-graphite-950/80 backdrop-blur-xl">
+      <div class="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
+        <div class="flex min-w-0 items-center gap-3">
+          <div
+            class="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-signal-blue/30 bg-signal-blue/10 text-signal-blue"
+            aria-hidden="true"
+          >
+            <svg viewBox="0 0 24 24" fill="none" class="h-5 w-5" stroke="currentColor" stroke-width="1.7">
+              <path d="M12 3 5.5 5.7v5.5c0 4.3 2.7 8.1 6.5 9.8 3.8-1.7 6.5-5.5 6.5-9.8V5.7L12 3Z"/>
+              <path d="m8.6 12 2.1 2.1 4.7-4.7"/>
+            </svg>
+          </div>
+          <div class="min-w-0">
+            <div class="flex items-baseline gap-2">
+              <h1 class="text-base font-semibold tracking-[0.08em] text-white">AUTOSOC</h1>
+              <span class="hidden font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500 sm:inline">Incident workbench</span>
+            </div>
+            <p class="truncate text-xs text-slate-500">Deterministic signal. Auditable response.</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <div class="hidden items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.025] px-3 py-1.5 sm:flex">
+            <span class="h-1.5 w-1.5 rounded-full bg-signal-green shadow-[0_0_10px_rgba(102,200,159,.7)]"></span>
+            <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-slate-400">Local runtime</span>
+          </div>
+          <div class="rounded-full border border-signal-amber/20 bg-signal-amber/[0.07] px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-signal-amber">
+            Dry-run only
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+      <div class="mb-6 flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
+        <div>
+          <p class="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-signal-blue">Operations / New analysis</p>
+          <h2 class="max-w-3xl text-2xl font-medium tracking-[-0.025em] text-white sm:text-3xl">
+            Turn raw activity into an approval-ready response.
+          </h2>
+        </div>
+        <p class="max-w-xl text-sm leading-6 text-slate-500 lg:text-right">
+          Detection stays deterministic. Agents can summarize verified facts, but cannot create findings or execute containment.
+        </p>
+      </div>
+
+      <div class="grid items-start gap-5 xl:grid-cols-[minmax(360px,0.78fr)_minmax(0,1.42fr)]">
+        <section
+          class="overflow-hidden rounded-2xl border border-white/[0.08] bg-graphite-900/95 shadow-console xl:sticky xl:top-5"
+          aria-labelledby="intake-heading"
+        >
+          <div class="flex items-center justify-between border-b border-white/[0.07] px-5 py-4">
+            <div>
+              <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">01 / Signal intake</p>
+              <h3 id="intake-heading" class="mt-1 text-sm font-medium text-white">Submit local log evidence</h3>
+            </div>
+            <span id="inputModeBadge" class="rounded-md bg-signal-blue/10 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-signal-blue">
+              JSONL · Offline
+            </span>
+          </div>
+
+          <form id="analysisForm" class="space-y-5 p-5" novalidate>
+            <div>
+              <div class="mb-2 flex items-center justify-between gap-3">
+                <label for="rawLog" class="text-xs font-medium text-slate-300">Raw log input</label>
+                <button
+                  id="clearInput"
+                  type="button"
+                  class="rounded px-1.5 py-1 text-[11px] text-slate-500 transition hover:bg-white/[0.05] hover:text-slate-300 focus:outline-none focus:ring-2 focus:ring-signal-blue/70"
+                >
+                  Clear
+                </button>
+              </div>
+              <textarea
+                id="rawLog"
+                name="raw_log"
+                rows="14"
+                spellcheck="false"
+                aria-describedby="raw-log-help inputError"
+                class="scrollbar-thin w-full resize-y rounded-xl border border-white/[0.09] bg-[#090d12] px-3.5 py-3 font-mono text-[11px] leading-[1.7] text-slate-300 outline-none transition placeholder:text-slate-700 focus:border-signal-blue/50 focus:ring-2 focus:ring-signal-blue/10"
+              >{"timestamp":"2026-08-27T09:00:00Z","event_type":"web_access","source_ip":"198.51.100.21","method":"GET","request_path":"/catalog?id=7%20UNION%20SELECT%20username,password%20FROM%20users--","status":403,"tls_version":"TLSv1.3"}
+{"timestamp":"2026-08-27T09:00:05Z","event_type":"web_access","source_ip":"203.0.113.32","method":"POST","request_path":"/login","request_body":"user=admin&password=%27%20OR%201%3D1--","status":401,"tls_version":"TLSv1.2"}
+{"timestamp":"2026-08-27T09:01:00Z","event_type":"tls_handshake","source_ip":"192.0.2.41","destination_ip":"10.20.0.20","tls_version":"SSLv3","cipher":"TLS_RSA_WITH_RC4_128_MD5"}
+{"timestamp":"2026-08-27T09:05:00Z","event_type":"web_access","source_ip":"10.20.5.10","method":"GET","request_path":"/health","status":200,"tls_version":"TLSv1.3"}</textarea>
+              <p id="raw-log-help" class="mt-2 text-[11px] leading-5 text-slate-500">
+                Paste JSONL or an Apache/Nginx access log. Processing remains on this host.
+              </p>
+              <p id="inputError" class="mt-2 hidden text-xs text-signal-red" role="alert"></p>
+            </div>
+
+            <div class="relative flex items-center gap-3 before:h-px before:flex-1 before:bg-white/[0.07] after:h-px after:flex-1 after:bg-white/[0.07]">
+              <span class="font-mono text-[9px] uppercase tracking-[0.2em] text-slate-600">or upload</span>
+            </div>
+
+            <div>
+              <label
+                for="logFile"
+                class="group flex cursor-pointer items-center gap-3 rounded-xl border border-dashed border-white/[0.12] bg-white/[0.018] p-3 transition hover:border-signal-blue/40 hover:bg-signal-blue/[0.04] focus-within:border-signal-blue/50 focus-within:ring-2 focus-within:ring-signal-blue/10"
+              >
+                <span class="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-white/[0.045] text-slate-400 transition group-hover:text-signal-blue" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.7">
+                    <path d="M12 16V4m0 0L8 8m4-4 4 4"/>
+                    <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>
+                  </svg>
+                </span>
+                <span class="min-w-0 flex-1">
+                  <span id="fileName" class="block truncate text-xs font-medium text-slate-300">Choose a log file</span>
+                  <span class="mt-0.5 block text-[10px] text-slate-600">.json, .jsonl, .log, or .txt · 2 MiB max</span>
+                </span>
+                <span class="rounded-md border border-white/[0.08] px-2 py-1 font-mono text-[9px] uppercase tracking-wider text-slate-500">Browse</span>
+                <input
+                  id="logFile"
+                  name="file"
+                  type="file"
+                  accept=".json,.jsonl,.log,.txt,application/json,text/plain"
+                  class="sr-only"
+                >
+              </label>
+              <p class="mt-2 text-[10px] text-slate-600">A selected file takes priority; pasted text is not transmitted with it.</p>
+            </div>
+
+            <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-3">
+              <div>
+                <label for="logFormat" class="mb-2 block text-xs font-medium text-slate-300">Input format</label>
+                <select
+                  id="logFormat"
+                  name="log_format"
+                  class="h-11 w-full rounded-xl border border-white/[0.09] bg-[#090d12] px-3 text-xs text-slate-300 outline-none transition focus:border-signal-blue/50 focus:ring-2 focus:ring-signal-blue/10"
+                >
+                  <option value="auto">Auto-detect</option>
+                  <option value="json">JSON / JSONL</option>
+                  <option value="apache">Apache combined</option>
+                  <option value="nginx">Nginx combined</option>
+                </select>
+              </div>
+
+              <div>
+                <span id="offline-label" class="mb-2 block text-xs font-medium text-slate-300">Provider mode</span>
+                <label class="flex h-11 items-center gap-2.5 rounded-xl border border-white/[0.09] bg-[#090d12] px-3 {% if live_providers_allowed %}cursor-pointer{% else %}cursor-not-allowed opacity-75{% endif %}">
+                  <input id="offlineMode" name="offline" type="checkbox" checked class="peer sr-only" aria-labelledby="offline-label offline-copy" {% if not live_providers_allowed %}disabled{% endif %}>
+                  <span class="relative h-5 w-9 rounded-full bg-slate-700 transition peer-checked:bg-signal-green/80 peer-focus-visible:ring-2 peer-focus-visible:ring-signal-blue peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-graphite-900 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition peer-checked:after:translate-x-4" aria-hidden="true"></span>
+                  <span id="offline-copy" class="font-mono text-[10px] uppercase tracking-wider text-slate-400">{% if live_providers_allowed %}Offline{% else %}Offline enforced{% endif %}</span>
+                </label>
+              </div>
+            </div>
+
+            <button
+              id="analyzeButton"
+              type="submit"
+              class="group flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-sm font-semibold text-graphite-950 shadow-lg shadow-black/20 transition hover:bg-white focus:outline-none focus:ring-2 focus:ring-signal-blue focus:ring-offset-2 focus:ring-offset-graphite-900 disabled:cursor-wait disabled:opacity-60"
+            >
+              <svg id="analyzeIcon" viewBox="0 0 24 24" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M4 5h16M4 12h10M4 19h7"/>
+                <path d="m17 15 3 3-3 3m3-3h-6"/>
+              </svg>
+              <svg id="loadingIcon" viewBox="0 0 24 24" fill="none" class="hidden h-4 w-4 animate-spin" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" opacity=".25"/>
+                <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+              </svg>
+              <span id="buttonText">Analyze &amp; Orchestrate</span>
+            </button>
+
+            <div class="flex items-start gap-2 rounded-lg border border-signal-amber/15 bg-signal-amber/[0.04] px-3 py-2.5">
+              <svg viewBox="0 0 24 24" fill="none" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-signal-amber" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M12 3 2.7 20h18.6L12 3Z"/><path d="M12 9v5m0 3h.01"/>
+              </svg>
+              <p class="text-[10px] leading-4 text-slate-500">
+                AutoSOC produces recommendations only. No firewall, cloud, or host action is executed by this interface.
+              </p>
+            </div>
+          </form>
+        </section>
+
+        <section class="min-w-0" aria-labelledby="results-heading">
+          <h3 id="results-heading" class="sr-only">Analysis results</h3>
+
+          <div id="statusAnnouncer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+
+          <div
+            id="emptyState"
+            class="grid min-h-[620px] place-items-center rounded-2xl border border-white/[0.07] bg-graphite-900/55 p-6 text-center shadow-console"
+          >
+            <div class="max-w-md">
+              <div class="relative mx-auto mb-6 h-24 w-24">
+                <div class="absolute inset-0 rounded-full border border-dashed border-slate-700"></div>
+                <div class="absolute inset-3 rounded-full border border-white/[0.07]"></div>
+                <div class="absolute inset-0 grid place-items-center text-slate-500">
+                  <svg viewBox="0 0 24 24" fill="none" class="h-8 w-8" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+                    <circle cx="11" cy="11" r="6"/><path d="m16 16 4 4M11 8v6m-3-3h6"/>
+                  </svg>
+                </div>
+                <span class="absolute right-0 top-3 h-2 w-2 rounded-full bg-signal-blue shadow-[0_0_12px_rgba(122,162,214,.8)]"></span>
+              </div>
+              <p class="font-mono text-[10px] uppercase tracking-[0.2em] text-slate-600">Awaiting evidence</p>
+              <h4 class="mt-3 text-lg font-medium text-slate-300">No incident has been analyzed</h4>
+              <p class="mt-2 text-sm leading-6 text-slate-600">
+                Submit raw activity to build the deterministic decision trace, agent summaries, and approval-gated playbook.
+              </p>
+              <div class="mx-auto mt-7 flex max-w-xs items-center justify-between font-mono text-[9px] uppercase tracking-wider text-slate-700" aria-hidden="true">
+                <span>Detect</span><span>—</span><span>Enrich</span><span>—</span><span>Respond</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="loadingState" class="hidden space-y-4" aria-hidden="true">
+            <div class="relative overflow-hidden rounded-2xl border border-signal-blue/20 bg-graphite-900/90 p-6 shadow-console loading-scan">
+              <div class="relative z-10 flex items-center gap-4">
+                <div class="grid h-11 w-11 place-items-center rounded-xl border border-signal-blue/25 bg-signal-blue/10 text-signal-blue">
+                  <svg viewBox="0 0 24 24" fill="none" class="h-5 w-5 animate-pulse" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                    <path d="M4 12h3l2-6 4 12 2-6h5"/>
+                  </svg>
+                </div>
+                <div>
+                  <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-signal-blue">Pipeline active</p>
+                  <p class="mt-1 text-sm text-slate-300">Normalizing logs and evaluating deterministic rules…</p>
+                </div>
+              </div>
+            </div>
+            <div class="grid gap-4 sm:grid-cols-3">
+              <div class="h-28 animate-pulse rounded-2xl border border-white/[0.06] bg-graphite-900/70"></div>
+              <div class="h-28 animate-pulse rounded-2xl border border-white/[0.06] bg-graphite-900/70 [animation-delay:120ms]"></div>
+              <div class="h-28 animate-pulse rounded-2xl border border-white/[0.06] bg-graphite-900/70 [animation-delay:240ms]"></div>
+            </div>
+            <div class="h-72 animate-pulse rounded-2xl border border-white/[0.06] bg-graphite-900/70"></div>
+          </div>
+
+          <div
+            id="errorState"
+            class="hidden rounded-2xl border border-signal-red/30 bg-signal-red/[0.055] p-6 shadow-console"
+            role="alert"
+          >
+            <div class="flex items-start gap-4">
+              <div class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-signal-red/10 text-signal-red">
+                <svg viewBox="0 0 24 24" fill="none" class="h-5 w-5" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/>
+                </svg>
+              </div>
+              <div class="min-w-0">
+                <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-signal-red">Analysis halted safely</p>
+                <h4 class="mt-1 text-base font-medium text-white">The request could not be completed</h4>
+                <p id="errorMessage" class="mt-2 break-words text-sm leading-6 text-slate-400"></p>
+                <button id="dismissError" type="button" class="mt-4 rounded-lg border border-white/[0.1] px-3 py-2 text-xs text-slate-300 transition hover:bg-white/[0.05] focus:outline-none focus:ring-2 focus:ring-signal-blue">
+                  Return to input
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="resultsState" tabindex="-1" class="hidden space-y-5 outline-none">
+            <section class="overflow-hidden rounded-2xl border border-white/[0.08] bg-graphite-900/90 shadow-console" aria-labelledby="summary-heading">
+              <div class="flex flex-col gap-3 border-b border-white/[0.07] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-signal-green">Analysis complete</p>
+                  <h4 id="summary-heading" class="mt-1 text-sm font-medium text-white">Deterministic incident summary</h4>
+                </div>
+                <div class="flex flex-wrap items-center gap-2 font-mono text-[9px] uppercase tracking-wider">
+                  <span id="reportMode" class="rounded-md border px-2 py-1"></span>
+                  <span id="reportId" class="max-w-[18rem] truncate rounded-md border border-white/[0.07] bg-white/[0.025] px-2 py-1 text-slate-500"></span>
+                </div>
+              </div>
+
+              <div class="grid gap-px bg-white/[0.06] sm:grid-cols-3">
+                <article class="flex items-center gap-4 bg-graphite-900 p-5">
+                  <div id="riskRing" class="risk-ring grid h-16 w-16 shrink-0 place-items-center rounded-full p-[5px]">
+                    <div class="grid h-full w-full place-items-center rounded-full bg-graphite-900">
+                      <span id="riskScore" class="font-mono text-lg font-semibold text-white">0</span>
+                    </div>
+                  </div>
+                  <div>
+                    <p class="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-600">Risk score</p>
+                    <p class="mt-1 text-sm text-slate-300"><span id="riskValue">0</span> / 100</p>
+                    <p class="mt-0.5 text-[10px] text-slate-600">Deterministic aggregate</p>
+                  </div>
+                </article>
+
+                <article class="bg-graphite-900 p-5">
+                  <p class="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-600">Derived severity</p>
+                  <div class="mt-3 flex items-center gap-2">
+                    <span id="severityDot" class="h-2 w-2 rounded-full"></span>
+                    <span id="severityValue" class="text-lg font-medium capitalize text-white"></span>
+                  </div>
+                  <p id="findingCount" class="mt-2 text-[10px] text-slate-600"></p>
+                </article>
+
+                <article class="min-w-0 bg-graphite-900 p-5">
+                  <p class="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-600">MITRE ATT&amp;CK</p>
+                  <div id="mitreMappings" class="mt-3 flex flex-wrap gap-1.5"></div>
+                  <p id="mitreEmpty" class="mt-3 hidden text-xs text-slate-600">No evidence-backed mapping</p>
+                </article>
+              </div>
+            </section>
+
+            <section class="rounded-2xl border border-white/[0.08] bg-graphite-900/90 p-5 shadow-console" aria-labelledby="trace-heading">
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-signal-blue">02 / Ground truth</p>
+                  <h4 id="trace-heading" class="mt-1 text-sm font-medium text-white">Decision trace &amp; observed evidence</h4>
+                </div>
+                <span id="traceCount" class="font-mono text-[9px] uppercase tracking-wider text-slate-600"></span>
+              </div>
+              <p class="mt-2 max-w-3xl text-xs leading-5 text-slate-500">
+                Rule outcomes and evidence values are emitted by the deterministic pipeline—not inferred by an agent.
+              </p>
+              <div id="decisionTrace" class="mt-5 space-y-3"></div>
+              <details id="evidenceDisclosure" class="mt-4 rounded-xl border border-white/[0.07] bg-black/10">
+                <summary class="cursor-pointer px-4 py-3 text-xs font-medium text-slate-300 outline-none marker:text-signal-blue focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-signal-blue">
+                  Inspect matched evidence
+                  <span id="evidenceCount" class="ml-1 font-mono text-[9px] text-slate-600"></span>
+                </summary>
+                <div id="evidenceList" class="space-y-2 border-t border-white/[0.06] p-3"></div>
+              </details>
+            </section>
+
+            <section class="rounded-2xl border border-white/[0.08] bg-graphite-900/90 p-5 shadow-console" aria-labelledby="swarm-heading">
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-signal-green">03 / Agent workflow</p>
+                  <h4 id="swarm-heading" class="mt-1 text-sm font-medium text-white">Swarm Chat</h4>
+                </div>
+                <span class="rounded-md border border-white/[0.07] bg-white/[0.025] px-2 py-1 font-mono text-[9px] uppercase tracking-wider text-slate-500">
+                  Auditable summaries · not chain-of-thought
+                </span>
+              </div>
+              <p class="mt-2 max-w-3xl text-xs leading-5 text-slate-500">
+                Each stage summarizes allow-listed incident facts and declares whether it used the constrained provider or deterministic fallback.
+              </p>
+              <ol id="agentThread" class="relative mt-6 space-y-6 before:absolute before:bottom-4 before:left-[17px] before:top-4 before:w-px before:bg-gradient-to-b before:from-signal-blue/50 before:via-signal-green/40 before:to-signal-amber/50"></ol>
+            </section>
+
+            <section class="overflow-hidden rounded-2xl border border-signal-amber/30 bg-signal-amber/[0.045] shadow-amber" aria-labelledby="playbook-heading">
+              <div class="flex flex-col gap-3 border-b border-signal-amber/20 bg-signal-amber/[0.055] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex items-center gap-3">
+                  <div class="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-signal-amber/25 bg-signal-amber/10 text-signal-amber" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.7">
+                      <path d="M8 4h8l1 3h3v13H4V7h3l1-3Z"/><path d="M9 12h6m-6 4h4"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-signal-amber">PENDING HUMAN APPROVAL</p>
+                    <h4 id="playbook-heading" class="mt-0.5 text-sm font-medium text-white">Containment playbook</h4>
+                  </div>
+                </div>
+                <button id="copyPlaybook" type="button" class="inline-flex items-center justify-center gap-2 rounded-lg border border-signal-amber/20 bg-black/10 px-3 py-2 text-xs text-slate-300 transition hover:bg-signal-amber/[0.08] focus:outline-none focus:ring-2 focus:ring-signal-amber">
+                  <svg viewBox="0 0 24 24" fill="none" class="h-3.5 w-3.5" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+                  <span id="copyLabel">Copy playbook</span>
+                </button>
+              </div>
+              <div class="p-5">
+                <div class="mb-4 flex items-start gap-2 rounded-lg border border-signal-amber/20 bg-black/15 px-3 py-2.5">
+                  <span class="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-signal-amber shadow-[0_0_10px_rgba(244,184,96,.7)]"></span>
+                  <p class="text-[11px] leading-5 text-slate-400">
+                    Recommendation only. Validate scope, ownership, rollback, and business impact before an authorized operator performs any action.
+                  </p>
+                </div>
+                <pre id="playbookContent" tabindex="0" class="scrollbar-thin max-h-[38rem] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-white/[0.07] bg-[#080b0e] p-4 font-mono text-[11px] leading-[1.75] text-slate-300 outline-none focus:ring-2 focus:ring-signal-amber/50"></pre>
+              </div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="mx-auto flex max-w-[1600px] flex-col gap-2 px-4 pb-6 pt-2 text-[10px] text-slate-700 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+      <span class="font-mono uppercase tracking-[0.15em]">AutoSOC · Local security engineering portfolio</span>
+      <span>Deterministic first · Offline safe · Human approved</span>
+    </footer>
+  </div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const form = document.getElementById("analysisForm");
+      const rawLog = document.getElementById("rawLog");
+      const logFile = document.getElementById("logFile");
+      const logFormat = document.getElementById("logFormat");
+      const offlineMode = document.getElementById("offlineMode");
+      const analyzeButton = document.getElementById("analyzeButton");
+      const buttonText = document.getElementById("buttonText");
+      const analyzeIcon = document.getElementById("analyzeIcon");
+      const loadingIcon = document.getElementById("loadingIcon");
+      const inputError = document.getElementById("inputError");
+      const fileName = document.getElementById("fileName");
+      const inputModeBadge = document.getElementById("inputModeBadge");
+      const statusAnnouncer = document.getElementById("statusAnnouncer");
+      const emptyState = document.getElementById("emptyState");
+      const loadingState = document.getElementById("loadingState");
+      const errorState = document.getElementById("errorState");
+      const resultsState = document.getElementById("resultsState");
+
+      const views = { empty: emptyState, loading: loadingState, error: errorState, results: resultsState };
+
+      function setView(name) {
+        Object.entries(views).forEach(([key, element]) => {
+          element.classList.toggle("hidden", key !== name);
+          if (key === "loading") {
+            element.setAttribute("aria-hidden", key === name ? "false" : "true");
+          }
+        });
+      }
+
+      function announce(message) {
+        statusAnnouncer.textContent = message;
+      }
+
+      function setBusy(isBusy) {
+        analyzeButton.disabled = isBusy;
+        analyzeButton.setAttribute("aria-busy", String(isBusy));
+        buttonText.textContent = isBusy ? "Analyzing evidence…" : "Analyze & Orchestrate";
+        analyzeIcon.classList.toggle("hidden", isBusy);
+        loadingIcon.classList.toggle("hidden", !isBusy);
+      }
+
+      function updateInputMode() {
+        const format = logFormat.options[logFormat.selectedIndex].text.replace("Auto-detect", "Auto");
+        const mode = offlineMode.disabled
+          ? "Offline enforced"
+          : (offlineMode.checked ? "Offline" : "Live");
+        inputModeBadge.textContent = `${format} · ${mode}`;
+        document.getElementById("offline-copy").textContent = mode;
+      }
+
+      function makeElement(tagName, className, text) {
+        const element = document.createElement(tagName);
+        if (className) element.className = className;
+        if (text !== undefined && text !== null) element.textContent = String(text);
+        return element;
+      }
+
+      function safeString(value) {
+        if (value === undefined || value === null) return "";
+        if (typeof value === "string") return value;
+        if (typeof value === "number" || typeof value === "boolean") return String(value);
+        try {
+          return JSON.stringify(value, null, 2);
+        } catch (_error) {
+          return "Unserializable value";
+        }
+      }
+
+      function detailMessage(payload, fallback) {
+        if (!payload || payload.detail === undefined) return fallback;
+        if (typeof payload.detail === "string") return payload.detail;
+        if (Array.isArray(payload.detail)) {
+          return payload.detail
+            .map((item) => item && item.msg ? String(item.msg) : safeString(item))
+            .join("; ");
+        }
+        return safeString(payload.detail);
+      }
+
+      function severityFor(score) {
+        if (score >= 80) return { label: "critical", color: "#ef6f6c" };
+        if (score >= 60) return { label: "high", color: "#f28b68" };
+        if (score >= 40) return { label: "medium", color: "#f4b860" };
+        if (score >= 20) return { label: "low", color: "#7aa2d6" };
+        return { label: "informational", color: "#66c89f" };
+      }
+
+      function renderMappings(report) {
+        const container = document.getElementById("mitreMappings");
+        const empty = document.getElementById("mitreEmpty");
+        container.replaceChildren();
+        const mappings = Array.isArray(report.mitre_attack_mappings) ? report.mitre_attack_mappings : [];
+
+        empty.classList.toggle("hidden", mappings.length > 0);
+        mappings.forEach((mapping) => {
+          const chip = makeElement(
+            "span",
+            "rounded-md border border-signal-blue/20 bg-signal-blue/[0.07] px-2 py-1 font-mono text-[10px] text-signal-blue"
+          );
+          const techniqueId = mapping && mapping.technique_id ? mapping.technique_id : "Unmapped";
+          const name = mapping && mapping.technique_name ? mapping.technique_name : "Technique";
+          chip.textContent = `${techniqueId} · ${name}`;
+          if (mapping && mapping.mapping_reason) chip.title = String(mapping.mapping_reason);
+          container.append(chip);
+        });
+      }
+
+      function traceMeta(entry) {
+        const outcome = entry && entry.outcome ? String(entry.outcome).replaceAll("_", " ") : "recorded";
+        const stage = entry && entry.stage ? String(entry.stage) : "pipeline";
+        return `${stage} · ${outcome}`;
+      }
+
+      function renderTrace(report) {
+        const traceContainer = document.getElementById("decisionTrace");
+        const evidenceContainer = document.getElementById("evidenceList");
+        traceContainer.replaceChildren();
+        evidenceContainer.replaceChildren();
+
+        const trace = Array.isArray(report.decision_trace) ? report.decision_trace : [];
+        document.getElementById("traceCount").textContent = `${trace.length} trace ${trace.length === 1 ? "entry" : "entries"}`;
+
+        if (trace.length === 0) {
+          traceContainer.append(makeElement("p", "rounded-xl border border-white/[0.06] bg-black/10 p-4 text-xs text-slate-600", "No decision-trace entries were returned."));
+        }
+
+        trace.forEach((entry, index) => {
+          const row = makeElement("article", "grid grid-cols-[auto_minmax(0,1fr)] gap-3 rounded-xl border border-white/[0.065] bg-black/10 p-3");
+          const sequence = makeElement("span", "grid h-7 w-7 place-items-center rounded-md border border-white/[0.08] bg-white/[0.025] font-mono text-[9px] text-slate-500", entry && entry.sequence ? entry.sequence : index + 1);
+          const body = makeElement("div", "min-w-0");
+          const top = makeElement("div", "flex flex-wrap items-center justify-between gap-2");
+          top.append(makeElement("p", "font-mono text-[9px] uppercase tracking-[0.15em] text-signal-blue", traceMeta(entry)));
+          if (entry && entry.rule_id) {
+            top.append(makeElement("span", "rounded bg-white/[0.035] px-1.5 py-0.5 font-mono text-[9px] text-slate-600", entry.rule_id));
+          }
+          const operation = entry && entry.operation ? entry.operation : entry && entry.component ? entry.component : "Recorded pipeline operation";
+          body.append(top, makeElement("p", "mt-1 break-words text-xs leading-5 text-slate-300", operation));
+          if (entry && entry.details && Object.keys(entry.details).length > 0) {
+            body.append(makeElement("pre", "scrollbar-thin mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-4 text-slate-600", safeString(entry.details)));
+          }
+          row.append(sequence, body);
+          traceContainer.append(row);
+        });
+
+        const findings = Array.isArray(report.findings) ? report.findings : [];
+        const evidence = findings.flatMap((finding) => {
+          const items = Array.isArray(finding && finding.evidence) ? finding.evidence : [];
+          return items.map((item) => ({ item, finding }));
+        });
+        document.getElementById("evidenceCount").textContent = `(${evidence.length})`;
+
+        if (evidence.length === 0) {
+          evidenceContainer.append(makeElement("p", "p-2 text-xs text-slate-600", "No matched evidence was returned."));
+        }
+
+        evidence.forEach(({ item, finding }) => {
+          const card = makeElement("article", "rounded-lg border border-white/[0.055] bg-[#080b0e] p-3");
+          const head = makeElement("div", "flex flex-wrap items-center justify-between gap-2");
+          const source = item && item.source_field ? item.source_field : "observed value";
+          head.append(makeElement("span", "font-mono text-[9px] uppercase tracking-wider text-signal-green", source));
+          if (finding && finding.rule_id) head.append(makeElement("span", "font-mono text-[9px] text-slate-700", finding.rule_id));
+          card.append(head);
+          if (item && item.description) card.append(makeElement("p", "mt-1 text-[11px] leading-5 text-slate-400", item.description));
+          if (item && item.observed_value !== undefined) card.append(makeElement("pre", "scrollbar-thin mt-2 overflow-auto whitespace-pre-wrap break-all rounded-md bg-black/20 px-2 py-1.5 font-mono text-[9px] leading-4 text-slate-500", safeString(item.observed_value)));
+          evidenceContainer.append(card);
+        });
+      }
+
+      function agentAppearance(agent) {
+        const name = String(agent || "Agent").toLowerCase();
+        if (name.includes("triage")) return { label: "Triage", initial: "T", dot: "border-signal-blue/40 bg-signal-blue/10 text-signal-blue", mode: "text-signal-blue" };
+        if (name.includes("intel")) return { label: "Intel", initial: "I", dot: "border-signal-green/40 bg-signal-green/10 text-signal-green", mode: "text-signal-green" };
+        if (name.includes("response")) return { label: "Response", initial: "R", dot: "border-signal-amber/40 bg-signal-amber/10 text-signal-amber", mode: "text-signal-amber" };
+        return { label: agent || "Agent", initial: "A", dot: "border-slate-600 bg-slate-800 text-slate-300", mode: "text-slate-400" };
+      }
+
+      function renderAgentThread(thread) {
+        const container = document.getElementById("agentThread");
+        container.replaceChildren();
+        const entries = Array.isArray(thread) ? thread : [];
+
+        if (entries.length === 0) {
+          container.append(makeElement("li", "relative pl-12 text-xs text-slate-600", "No agent summaries were returned."));
+          return;
+        }
+
+        entries.forEach((entry) => {
+          const appearance = agentAppearance(entry && entry.agent);
+          const item = makeElement("li", "relative grid grid-cols-[36px_minmax(0,1fr)] gap-4");
+          const marker = makeElement("div", `relative z-10 grid h-9 w-9 place-items-center rounded-full border font-mono text-[10px] font-semibold ${appearance.dot}`, appearance.initial);
+          const card = makeElement("article", "min-w-0 rounded-xl border border-white/[0.07] bg-black/10 p-4");
+          const header = makeElement("div", "flex flex-wrap items-center justify-between gap-2");
+          const identity = makeElement("div", "flex items-center gap-2");
+          identity.append(makeElement("h5", "text-xs font-semibold text-slate-200", `${appearance.label} Agent`));
+          identity.append(makeElement("span", "rounded bg-white/[0.035] px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-wider text-slate-600", "summary"));
+          const mode = entry && entry.generation_mode ? String(entry.generation_mode).replaceAll("_", " ") : "unspecified mode";
+          header.append(identity, makeElement("span", `font-mono text-[9px] uppercase tracking-wider ${appearance.mode}`, mode));
+          const content = entry && entry.content ? entry.content : "No summary content returned.";
+          card.append(header, makeElement("p", "mt-3 whitespace-pre-wrap break-words text-xs leading-6 text-slate-400", content));
+          item.append(marker, card);
+          container.append(item);
+        });
+      }
+
+      function renderResults(payload) {
+        const report = payload && payload.incident_report;
+        if (!report || typeof report !== "object") {
+          throw new Error("The server response did not include a valid incident_report.");
+        }
+
+        const risk = Math.max(0, Math.min(100, Number(report.overall_risk_score) || 0));
+        const severity = severityFor(risk);
+        const findings = Array.isArray(report.findings) ? report.findings : [];
+        const reportId = report.report_id ? String(report.report_id) : "report id unavailable";
+
+        const riskRing = document.getElementById("riskRing");
+        riskRing.style.setProperty("--risk-value", String(risk));
+        riskRing.style.setProperty("--risk-color", severity.color);
+        document.getElementById("riskScore").textContent = String(risk);
+        document.getElementById("riskValue").textContent = String(risk);
+        document.getElementById("severityValue").textContent = severity.label;
+        document.getElementById("severityDot").style.backgroundColor = severity.color;
+        document.getElementById("severityDot").style.boxShadow = `0 0 10px ${severity.color}`;
+        document.getElementById("findingCount").textContent = `${findings.length} deterministic ${findings.length === 1 ? "finding" : "findings"}`;
+        document.getElementById("reportId").textContent = `ID ${reportId}`;
+        document.getElementById("reportId").title = reportId;
+
+        const mode = document.getElementById("reportMode");
+        const isOffline = Boolean(report.offline_mode);
+        mode.textContent = isOffline ? "Offline report" : "Live enrichment";
+        mode.className = isOffline
+          ? "rounded-md border border-signal-green/20 bg-signal-green/[0.06] px-2 py-1 text-signal-green"
+          : "rounded-md border border-signal-blue/20 bg-signal-blue/[0.06] px-2 py-1 text-signal-blue";
+
+        renderMappings(report);
+        renderTrace(report);
+        renderAgentThread(payload.agent_thread);
+        document.getElementById("playbookContent").textContent = payload.playbook || "No containment playbook was returned.";
+
+        setView("results");
+        announce(`Analysis complete. Risk score ${risk} out of 100, severity ${severity.label}, with ${findings.length} deterministic findings.`);
+        resultsState.focus({ preventScroll: true });
+      }
+
+      function showError(message) {
+        document.getElementById("errorMessage").textContent = message;
+        setView("error");
+        announce(`Analysis failed safely. ${message}`);
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        inputError.classList.add("hidden");
+        inputError.textContent = "";
+
+        const file = logFile.files && logFile.files[0];
+        const raw = rawLog.value.trim();
+        if (!file && !raw) {
+          inputError.textContent = "Paste at least one log record or choose a local log file.";
+          inputError.classList.remove("hidden");
+          rawLog.focus();
+          announce("Input required before analysis can begin.");
+          return;
+        }
+
+        const formData = new FormData();
+        if (file) {
+          formData.append("file", file, file.name);
+        } else {
+          formData.append("raw_log", raw);
+        }
+        formData.append("offline", String(offlineMode.checked));
+        formData.append("log_format", logFormat.value);
+
+        setBusy(true);
+        setView("loading");
+        announce("Analysis started. AutoSOC is evaluating deterministic rules and orchestrating grounded agent summaries.");
+
+        try {
+          const response = await fetch("/api/orchestrate", {
+            method: "POST",
+            body: formData,
+            headers: { Accept: "application/json" }
+          });
+
+          let payload;
+          try {
+            payload = await response.json();
+          } catch (_error) {
+            throw new Error(response.ok ? "The server returned invalid JSON." : `Server request failed with status ${response.status}.`);
+          }
+
+          if (!response.ok) {
+            throw new Error(detailMessage(payload, `Server request failed with status ${response.status}.`));
+          }
+
+          renderResults(payload);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "An unexpected local error occurred.";
+          showError(message);
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      logFile.addEventListener("change", () => {
+        const file = logFile.files && logFile.files[0];
+        fileName.textContent = file ? file.name : "Choose a log file";
+        fileName.title = file ? file.name : "";
+      });
+
+      document.getElementById("clearInput").addEventListener("click", () => {
+        rawLog.value = "";
+        logFile.value = "";
+        fileName.textContent = "Choose a log file";
+        fileName.title = "";
+        rawLog.focus();
+      });
+
+      document.getElementById("dismissError").addEventListener("click", () => {
+        setView("empty");
+        rawLog.focus();
+      });
+
+      document.getElementById("copyPlaybook").addEventListener("click", async () => {
+        const label = document.getElementById("copyLabel");
+        const playbook = document.getElementById("playbookContent").textContent;
+        try {
+          await navigator.clipboard.writeText(playbook);
+          label.textContent = "Copied";
+          announce("Containment playbook copied to the clipboard. Human approval is still required.");
+        } catch (_error) {
+          label.textContent = "Copy unavailable";
+          announce("Clipboard access is unavailable. Select the playbook text to copy it manually.");
+        }
+        window.setTimeout(() => { label.textContent = "Copy playbook"; }, 1800);
+      });
+
+      logFormat.addEventListener("change", updateInputMode);
+      offlineMode.addEventListener("change", updateInputMode);
+      updateInputMode();
+    })();
+  </script>
+</body>
+</html>

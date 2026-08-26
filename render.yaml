@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: autosoc-dashboard
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install .
+    startCommand: uvicorn autosoc.web.app:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: AUTOSOC_ENABLE_LIVE_PROVIDERS
+        value: "false"
+      - key: AUTOSOC_RATE_LIMIT_PER_MINUTE
+        value: "12"
