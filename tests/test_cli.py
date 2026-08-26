@@ -15,7 +15,15 @@ from typer.testing import CliRunner
 
 from autosoc.cli import analyze_file, app
 from autosoc.integrations.abuseipdb import AbuseIPDBClient
-from autosoc.models import IncidentReport, ThreatIntelMode, TraceStage
+from autosoc.integrations.greynoise import GreyNoiseClient
+from autosoc.models import (
+    GreyNoiseClassification,
+    GreyNoiseLookupStatus,
+    IncidentReport,
+    ThreatIntelMode,
+    TraceOutcome,
+    TraceStage,
+)
 
 
 def _malicious_log(source_ip: str = "8.8.8.8") -> str:
@@ -43,14 +51,23 @@ class CLIWorkflowTests(unittest.TestCase):
         self.assertEqual(len(report.events), 1)
         self.assertEqual(len(report.findings), 3)
         self.assertEqual(len(report.threat_intelligence), 1)
+        self.assertEqual(len(report.greynoise_intelligence), 1)
         self.assertEqual(
             report.threat_intelligence[0].mode,
             ThreatIntelMode.MOCK,
+        )
+        self.assertEqual(
+            report.greynoise_intelligence[0].lookup_status,
+            GreyNoiseLookupStatus.OFFLINE,
         )
         self.assertEqual(report.threat_intelligence[0].abuse_confidence_score, 0)
         self.assertEqual(report.mitre_attack_mappings[0].technique_id, "T1190")
         for finding in report.findings:
             self.assertEqual(finding.decision_trace[-2].stage, TraceStage.ENRICHMENT)
+            self.assertEqual(
+                finding.decision_trace[-2].outcome,
+                TraceOutcome.SKIPPED,
+            )
             self.assertEqual(finding.decision_trace[-1].stage, TraceStage.SCORING)
             self.assertTrue(
                 any(
@@ -86,7 +103,11 @@ class CLIWorkflowTests(unittest.TestCase):
             log_path = Path(directory) / "event.json"
             log_path.write_text(_malicious_log(), encoding="utf-8")
             report = asyncio.run(
-                analyze_file(log_path, intel_client=client)
+                analyze_file(
+                    log_path,
+                    intel_client=client,
+                    greynoise_client=GreyNoiseClient(),
+                )
             )
 
         self.assertEqual(calls, 1)
@@ -97,6 +118,119 @@ class CLIWorkflowTests(unittest.TestCase):
                 finding.risk_score_components[-1].points == 20
                 for finding in report.findings
             )
+        )
+
+    def test_live_greynoise_is_cached_and_filters_every_finding(self) -> None:
+        abuse_calls = 0
+        greynoise_calls = 0
+
+        def abuse_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal abuse_calls
+            abuse_calls += 1
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "data": {
+                        "ipAddress": "8.8.8.8",
+                        "abuseConfidenceScore": 100,
+                        "countryCode": "US",
+                        "usageType": "Data Center/Web Hosting/Transit",
+                    }
+                },
+            )
+
+        def greynoise_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal greynoise_calls
+            greynoise_calls += 1
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "ip": "8.8.8.8",
+                    "noise": True,
+                    "riot": False,
+                    "classification": "unknown",
+                    "name": "Example Internet Scanner",
+                    "link": "https://viz.greynoise.io/ip/8.8.8.8",
+                    "last_seen": "2026-08-27",
+                    "message": "IP context found",
+                },
+            )
+
+        abuse_client = AbuseIPDBClient(
+            api_key="abuse-secret",
+            transport=httpx.MockTransport(abuse_handler),
+        )
+        greynoise_client = GreyNoiseClient(
+            api_key="greynoise-secret",
+            transport=httpx.MockTransport(greynoise_handler),
+        )
+        with TemporaryDirectory() as directory:
+            log_path = Path(directory) / "event.json"
+            log_path.write_text(_malicious_log(), encoding="utf-8")
+            report = asyncio.run(
+                analyze_file(
+                    log_path,
+                    intel_client=abuse_client,
+                    greynoise_client=greynoise_client,
+                )
+            )
+
+        self.assertEqual(abuse_calls, 1)
+        self.assertEqual(greynoise_calls, 1)
+        self.assertEqual(report.overall_risk_score, 21)
+        self.assertEqual(
+            report.greynoise_intelligence[0].classification,
+            GreyNoiseClassification.UNKNOWN,
+        )
+        self.assertTrue(report.greynoise_intelligence[0].risk_reduction_eligible)
+        for finding in report.findings:
+            component = finding.risk_score_components[-1]
+            self.assertEqual(component.component, "greynoise_noise_filter")
+            self.assertLess(component.points, 0)
+
+    def test_greynoise_provider_failure_is_neutral_and_traced(self) -> None:
+        def greynoise_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, request=request, json={"message": "down"})
+
+        with TemporaryDirectory() as directory:
+            log_path = Path(directory) / "event.json"
+            log_path.write_text(_malicious_log(), encoding="utf-8")
+            report = asyncio.run(
+                analyze_file(
+                    log_path,
+                    intel_client=AbuseIPDBClient(),
+                    greynoise_client=GreyNoiseClient(
+                        api_key="greynoise-secret",
+                        transport=httpx.MockTransport(greynoise_handler),
+                    ),
+                )
+            )
+
+        self.assertEqual(
+            report.greynoise_intelligence[0].lookup_status,
+            GreyNoiseLookupStatus.PROVIDER_ERROR,
+        )
+        for finding in report.findings:
+            greynoise_trace = finding.decision_trace[-2]
+            self.assertEqual(greynoise_trace.component, "greynoise_client")
+            self.assertEqual(greynoise_trace.outcome, TraceOutcome.FAILED)
+            self.assertFalse(
+                any(
+                    component.component == "greynoise_noise_filter"
+                    for component in finding.risk_score_components
+                )
+            )
+        report_trace = next(
+            item
+            for item in report.decision_trace
+            if item.component == "greynoise_client"
+        )
+        self.assertEqual(report_trace.outcome, TraceOutcome.FAILED)
+        self.assertEqual(
+            report_trace.details["lookup_status_counts"],
+            {"provider_error": 1},
         )
 
     def test_private_ip_never_reaches_injected_transport(self) -> None:
@@ -166,6 +300,7 @@ class CLIWorkflowTests(unittest.TestCase):
 
         self.assertEqual(report.findings, [])
         self.assertEqual(report.threat_intelligence, [])
+        self.assertEqual(report.greynoise_intelligence, [])
         self.assertEqual(report.overall_risk_score, 0)
 
     def test_analyze_command_prints_json(self) -> None:

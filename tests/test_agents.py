@@ -262,6 +262,9 @@ class AgentGraphContractTests(unittest.TestCase):
                 for message in result["messages"]
             )
         )
+        self.assertIn("GreyNoise", _content(result["messages"][1]))
+        self.assertIn("status `offline`", _content(result["messages"][1]))
+        self.assertIn("GreyNoise", result["playbook"])
         self.assertIn("SAFETY GATE", result["playbook"])
 
     def test_missing_key_uses_fallback_without_constructing_chatopenai(self) -> None:

@@ -9,10 +9,17 @@ from math import isfinite
 from types import MappingProxyType
 from uuid import UUID
 
-from autosoc.models import ScoreContribution, Severity
+from autosoc.models import (
+    GreyNoiseClassification,
+    GreyNoiseResult,
+    ScoreContribution,
+    Severity,
+    ThreatIntelMode,
+)
 
-FORMULA_VERSION = "1.0"
+FORMULA_VERSION = "1.1"
 IP_REPUTATION_MAX_POINTS = 20
+GREYNOISE_RETAINED_FRACTION = Decimal("0.25")
 
 SEVERITY_BASE_POINTS = MappingProxyType(
     {
@@ -25,7 +32,7 @@ SEVERITY_BASE_POINTS = MappingProxyType(
 )
 
 
-def _round_half_up(value: float) -> int:
+def _round_half_up(value: float | Decimal) -> int:
     return int(
         Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     )
@@ -51,6 +58,14 @@ def _validated_reputation(value: float | None) -> float | None:
     return numeric_value
 
 
+def _validated_greynoise_result(
+    value: GreyNoiseResult | None,
+) -> GreyNoiseResult | None:
+    if value is None or isinstance(value, GreyNoiseResult):
+        return value
+    raise TypeError("greynoise_result must be GreyNoiseResult or None")
+
+
 @dataclass(frozen=True, slots=True)
 class RiskAssessment:
     """Calculated score plus the exact additive components used to derive it."""
@@ -65,7 +80,10 @@ class RiskAssessment:
         return {
             "formula_version": self.formula_version,
             "score": self.score,
-            "calculation": "clamp(severity + confidence_adjustment + ip_reputation)",
+            "calculation": (
+                "clamp(clamp(severity + confidence_adjustment + ip_reputation) "
+                "+ greynoise_noise_filter)"
+            ),
             "components": [
                 component.model_dump(mode="json") for component in self.components
             ],
@@ -79,13 +97,15 @@ def calculate_risk_score(
     *,
     evidence_ids: Iterable[UUID] = (),
     ip_reputation_evidence_ids: Iterable[UUID] = (),
+    greynoise_result: GreyNoiseResult | None = None,
+    greynoise_evidence_ids: Iterable[UUID] = (),
 ) -> RiskAssessment:
     """Calculate a 0-100 score using a documented additive formula.
 
     ``ip_reputation_score`` follows AbuseIPDB-style semantics: 0 means no known
-    abuse and 100 means highly likely malicious.  ``None`` is deliberately
-    neutral, which allows Step 3 to operate before threat-intelligence
-    enrichment is available.
+    abuse and 100 means highly likely malicious. A validated, live
+    ``GreyNoiseResult`` can then retain 25% of the subtotal for benign or unknown
+    background scanners. A malicious classification always disables reduction.
     """
 
     try:
@@ -94,8 +114,10 @@ def calculate_risk_score(
         raise ValueError(f"unsupported severity: {severity!r}") from exc
     confidence = _validated_unit_score(confidence_score, "confidence_score")
     reputation = _validated_reputation(ip_reputation_score)
+    greynoise = _validated_greynoise_result(greynoise_result)
     detection_evidence_ids = list(evidence_ids)
     reputation_evidence_ids = list(ip_reputation_evidence_ids)
+    noise_evidence_ids = list(greynoise_evidence_ids)
 
     severity_points = SEVERITY_BASE_POINTS[normalized_severity]
     confidence_adjusted_points = _round_half_up(severity_points * confidence)
@@ -108,7 +130,7 @@ def calculate_risk_score(
         )
     )
 
-    components = (
+    components: list[ScoreContribution] = [
         ScoreContribution(
             component="severity_baseline",
             points=severity_points,
@@ -141,9 +163,44 @@ def calculate_risk_score(
             ),
             evidence_ids=reputation_evidence_ids,
         ),
-    )
+    ]
+
+    if greynoise is not None and greynoise.mode == ThreatIntelMode.LIVE:
+        subtotal = max(0, min(100, sum(item.points for item in components)))
+        if greynoise.risk_reduction_eligible:
+            retained_score = _round_half_up(
+                Decimal(subtotal) * GREYNOISE_RETAINED_FRACTION
+            )
+            noise_adjustment = retained_score - subtotal
+            reason = (
+                "Authoritative GreyNoise context identified benign or unknown "
+                "background scanner traffic; retained 25% of the "
+                f"{subtotal}-point pre-filter subtotal."
+            )
+        else:
+            noise_adjustment = 0
+            reason = (
+                "GreyNoise did not authorize noise reduction. Malicious "
+                "classifications override the scanner-noise filter."
+                if greynoise.classification
+                == GreyNoiseClassification.MALICIOUS
+                else (
+                    "Authoritative GreyNoise context did not identify eligible "
+                    "benign/background scanner traffic; lookup status was "
+                    f"{greynoise.lookup_status.value}."
+                )
+            )
+        components.append(
+            ScoreContribution(
+                component="greynoise_noise_filter",
+                points=noise_adjustment,
+                reason=reason,
+                evidence_ids=noise_evidence_ids,
+            )
+        )
+
     score = max(0, min(100, sum(component.points for component in components)))
-    return RiskAssessment(score=score, components=components)
+    return RiskAssessment(score=score, components=tuple(components))
 
 
 def severity_from_score(score: int) -> Severity:
@@ -166,6 +223,7 @@ def severity_from_score(score: int) -> Severity:
 
 __all__ = [
     "FORMULA_VERSION",
+    "GREYNOISE_RETAINED_FRACTION",
     "IP_REPUTATION_MAX_POINTS",
     "RiskAssessment",
     "SEVERITY_BASE_POINTS",

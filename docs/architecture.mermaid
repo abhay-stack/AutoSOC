@@ -10,10 +10,15 @@ flowchart TB
         TLS["Weak-TLS rules\nprotocol and cipher deny-lists"]
         FINDING["DetectionFinding\nevidence + confidence + ATT&CK"]
         BASE["Transparent base score\nseverity + confidence"]
-        IPGATE{"Global unicast IP\nand API key available?"}
+        ABUSEGATE{"AbuseIPDB eligible?\nglobal unicast + API key"}
+        GREYGATE{"GreyNoise eligible?\nglobal IPv4 + API key"}
         ABUSE["AbuseIPDB check\nasync httpx client"]
-        MOCK["Labeled mock result\nno external request"]
-        RESCORE["Deterministic re-score\nIP reputation contribution"]
+        GREY["GreyNoise Community check\nasync httpx client"]
+        NEUTRAL["Labeled neutral result\noffline / no key / ineligible / failure"]
+        GREYPOLICY{"Live GreyNoise context\nbenign or unknown noise?"}
+        REDUCE["Retain 25% of subtotal\nvisible 75% reduction"]
+        PRESERVE["No GreyNoise reduction\nmalicious overrides noise"]
+        RESCORE["Deterministic re-score\nreputation + noise filter"]
         REPORT["Validated IncidentReport\ndecision trace + provenance"]
     end
 
@@ -37,7 +42,10 @@ flowchart TB
     subgraph APPROVAL["Human-in-the-loop boundary"]
         PLAYBOOK["DRY RUN / PREVIEW ONLY\nPENDING HUMAN APPROVAL"]
         HUMAN{"Named human approver\nvalidates scope and impact"}
-        EXTERNAL["Approved change workflow\noutside AutoSOC"]
+        APPROVALAPI["POST /api/execute-playbook\nvalidated approval receipt"]
+        TARGETS["Re-derive firewall targets\nnormalized unicast SQLi IPs only"]
+        ARTIFACT["0600 comment-only artifact\nAUTOSOC_DATA_DIR/remediation"]
+        EXTERNAL["Manual inspection and change workflow\noutside AutoSOC"]
         REJECT["Reject, revise, or monitor"]
     end
 
@@ -47,11 +55,22 @@ flowchart TB
     PARSER --> TLS
     SQLI --> FINDING
     TLS --> FINDING
-    FINDING --> BASE --> IPGATE
-    IPGATE -- "yes" --> ABUSE
-    IPGATE -- "no / offline / failure" --> MOCK
+    FINDING --> BASE
+    BASE --> ABUSEGATE
+    BASE --> GREYGATE
+    ABUSEGATE -- "yes" --> ABUSE
+    ABUSEGATE -- "no" --> NEUTRAL
+    GREYGATE -- "yes" --> GREY
+    GREYGATE -- "no" --> NEUTRAL
+    GREY --> GREYPOLICY
+    GREYPOLICY -- "yes" --> REDUCE
+    GREYPOLICY -- "malicious / other" --> PRESERVE
     ABUSE --> RESCORE
-    MOCK --> RESCORE
+    ABUSE -. "request / validation failure" .-> NEUTRAL
+    GREY -. "request / validation failure" .-> NEUTRAL
+    NEUTRAL --> RESCORE
+    REDUCE --> RESCORE
+    PRESERVE --> RESCORE
     RESCORE --> REPORT
     PARSER -. "zero findings" .-> REPORT
 
@@ -73,7 +92,9 @@ flowchart TB
     RESPONSE -. "invokes inside node" .-> RENDER
 
     RENDER --> PLAYBOOK --> HUMAN
-    HUMAN -- "approved" --> EXTERNAL
+    HUMAN -- "approved for artifact generation" --> APPROVALAPI
+    APPROVALAPI --> TARGETS --> ARTIFACT
+    ARTIFACT -. "never executed by AutoSOC" .-> EXTERNAL
     HUMAN -- "not approved" --> REJECT
 
     classDef deterministic fill:#dff7e5,stroke:#207a3c,color:#102a18,stroke-width:2px;
@@ -82,8 +103,9 @@ flowchart TB
     classDef danger fill:#fde2e2,stroke:#a61b1b,color:#4a0d0d,stroke-width:2px;
     classDef external fill:#f2e8ff,stroke:#7040a0,color:#2c1742,stroke-width:2px;
 
-    class PARSER,SQLI,TLS,FINDING,BASE,IPGATE,ABUSE,MOCK,RESCORE,REPORT deterministic;
+    class PARSER,SQLI,TLS,FINDING,BASE,ABUSEGATE,GREYGATE,ABUSE,GREY,NEUTRAL,GREYPOLICY,REDUCE,PRESERVE,RESCORE,REPORT deterministic;
     class START,STATE,TRIAGE,INTEL,RESPONSE,END agent;
-    class PACKET,SELECT,LLM,LOCAL,RENDER guard;
-    class PLAYBOOK,HUMAN,REJECT danger;
+    class PACKET,SELECT,LLM,LOCAL,RENDER,APPROVALAPI guard;
+    class TARGETS deterministic;
+    class PLAYBOOK,HUMAN,ARTIFACT,REJECT danger;
     class EXTERNAL external;

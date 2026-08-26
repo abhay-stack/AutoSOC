@@ -22,10 +22,15 @@ flowchart TB
         TLS["Weak-TLS rules\nprotocol and cipher deny-lists"]
         FINDING["DetectionFinding\nevidence + confidence + ATT&CK"]
         BASE["Transparent base score\nseverity + confidence"]
-        IPGATE{"Global unicast IP\nand API key available?"}
+        ABUSEGATE{"AbuseIPDB eligible?\nglobal unicast + API key"}
+        GREYGATE{"GreyNoise eligible?\nglobal IPv4 + API key"}
         ABUSE["AbuseIPDB check\nasync httpx client"]
-        MOCK["Labeled mock result\nno external request"]
-        RESCORE["Deterministic re-score\nIP reputation contribution"]
+        GREY["GreyNoise Community check\nasync httpx client"]
+        NEUTRAL["Labeled neutral result\noffline / no key / ineligible / failure"]
+        GREYPOLICY{"Live GreyNoise context\nbenign or unknown noise?"}
+        REDUCE["Retain 25% of subtotal\nvisible 75% reduction"]
+        PRESERVE["No GreyNoise reduction\nmalicious overrides noise"]
+        RESCORE["Deterministic re-score\nreputation + noise filter"]
         REPORT["Validated IncidentReport\ndecision trace + provenance"]
     end
 
@@ -49,7 +54,10 @@ flowchart TB
     subgraph APPROVAL["Human-in-the-loop boundary"]
         PLAYBOOK["DRY RUN / PREVIEW ONLY\nPENDING HUMAN APPROVAL"]
         HUMAN{"Named human approver\nvalidates scope and impact"}
-        EXTERNAL["Approved change workflow\noutside AutoSOC"]
+        APPROVALAPI["POST /api/execute-playbook\nvalidated approval receipt"]
+        TARGETS["Re-derive firewall targets\nnormalized unicast SQLi IPs only"]
+        ARTIFACT["0600 comment-only artifact\nAUTOSOC_DATA_DIR/remediation"]
+        EXTERNAL["Manual inspection and change workflow\noutside AutoSOC"]
         REJECT["Reject, revise, or monitor"]
     end
 
@@ -59,11 +67,22 @@ flowchart TB
     PARSER --> TLS
     SQLI --> FINDING
     TLS --> FINDING
-    FINDING --> BASE --> IPGATE
-    IPGATE -- "yes" --> ABUSE
-    IPGATE -- "no / offline / failure" --> MOCK
+    FINDING --> BASE
+    BASE --> ABUSEGATE
+    BASE --> GREYGATE
+    ABUSEGATE -- "yes" --> ABUSE
+    ABUSEGATE -- "no" --> NEUTRAL
+    GREYGATE -- "yes" --> GREY
+    GREYGATE -- "no" --> NEUTRAL
+    GREY --> GREYPOLICY
+    GREYPOLICY -- "yes" --> REDUCE
+    GREYPOLICY -- "malicious / other" --> PRESERVE
     ABUSE --> RESCORE
-    MOCK --> RESCORE
+    ABUSE -. "request / validation failure" .-> NEUTRAL
+    GREY -. "request / validation failure" .-> NEUTRAL
+    NEUTRAL --> RESCORE
+    REDUCE --> RESCORE
+    PRESERVE --> RESCORE
     RESCORE --> REPORT
     PARSER -. "zero findings" .-> REPORT
 
@@ -85,7 +104,9 @@ flowchart TB
     RESPONSE -. "invokes inside node" .-> RENDER
 
     RENDER --> PLAYBOOK --> HUMAN
-    HUMAN -- "approved" --> EXTERNAL
+    HUMAN -- "approved for artifact generation" --> APPROVALAPI
+    APPROVALAPI --> TARGETS --> ARTIFACT
+    ARTIFACT -. "never executed by AutoSOC" .-> EXTERNAL
     HUMAN -- "not approved" --> REJECT
 
     classDef deterministic fill:#dff7e5,stroke:#207a3c,color:#102a18,stroke-width:2px;
@@ -94,10 +115,11 @@ flowchart TB
     classDef danger fill:#fde2e2,stroke:#a61b1b,color:#4a0d0d,stroke-width:2px;
     classDef external fill:#f2e8ff,stroke:#7040a0,color:#2c1742,stroke-width:2px;
 
-    class PARSER,SQLI,TLS,FINDING,BASE,IPGATE,ABUSE,MOCK,RESCORE,REPORT deterministic;
+    class PARSER,SQLI,TLS,FINDING,BASE,ABUSEGATE,GREYGATE,ABUSE,GREY,NEUTRAL,GREYPOLICY,REDUCE,PRESERVE,RESCORE,REPORT deterministic;
     class START,STATE,TRIAGE,INTEL,RESPONSE,END agent;
-    class PACKET,SELECT,LLM,LOCAL,RENDER guard;
-    class PLAYBOOK,HUMAN,REJECT danger;
+    class PACKET,SELECT,LLM,LOCAL,RENDER,APPROVALAPI guard;
+    class TARGETS deterministic;
+    class PLAYBOOK,HUMAN,ARTIFACT,REJECT danger;
     class EXTERNAL external;
 ```
 
@@ -135,10 +157,32 @@ fallback used in offline mode. Python renders every message and playbook section
 
 ### Boundary 3: playbook to infrastructure
 
-The Response node ends at a preview. AutoSOC has no command-execution edge,
-firewall tool, AWS credentials, or approval API. A named human must validate the
-asset, evidence, business impact, exact command, change ticket, and rollback
-before moving an action into an external change process.
+The Response node ends at a preview. A named human must validate the asset,
+evidence, business impact, target scope, change ticket, and rollback before
+submitting `POST /api/execute-playbook`. The endpoint records approval for
+artifact generation only; it does not authorize or execute a host change.
+
+The server revalidates the submitted `IncidentReport`, requires its `report_id`
+to match the separately supplied report ID, and accepts only the literal JSON
+boolean `approval_confirmed: true`, a bounded approver identity, and an optional
+single-line approval reason. It then derives targets again from normalized events
+backed by deterministic SQL-injection findings. Agent text and command previews
+are never inputs to this derivation.
+
+Normalized unicast source IPs are eligible, including private enterprise ranges
+and RFC documentation ranges. Loopback, link-local, multicast, and unspecified
+or reserved non-host sources are withheld; TLS-only reports are also ineligible.
+The bounded target set is written atomically to
+`AUTOSOC_DATA_DIR/remediation/firewall_remediation.sh`. Every line in that file
+is a shell comment, its mode is `0600`, and it has no executable bit. Symlinked
+directories or targets fail closed.
+
+The `201 Created` response is an explicit approval receipt containing the report
+and receipt IDs, approver, approval time, approved targets, relative artifact
+path, SHA-256 digest, byte size, replacement status, `executed: false`, and a
+safety notice. AutoSOC still has no firewall execution edge, firewall capability,
+AWS credentials, or subprocess call in this workflow. Inspection, change-control
+authorization, command extraction, and execution remain outside AutoSOC.
 
 ## Tier 1: deterministic pipeline
 
@@ -148,18 +192,37 @@ before moving an action into an external change process.
 | SQLi detection | `detectors/sqli.py` | URL-decoded evidence, exact regex match offsets, confidence, `T1190`, and trace entries |
 | TLS detection | `detectors/weak_tls.py` | Canonical deprecated protocol or exact weak-cipher evidence; no speculative ATT&CK mapping |
 | Base scoring | `scoring/risk.py` | Versioned severity baseline and confidence adjustment |
-| Enrichment | `integrations/abuseipdb.py` | Live or mock provenance, score, country, usage type, retrieval reason, and timestamp |
-| Re-scoring | `cli.py` | A bounded IP-reputation contribution and a new scoring trace entry |
+| AbuseIPDB enrichment | `integrations/abuseipdb.py` | Live or mock provenance, score, country, usage type, retrieval reason, and timestamp |
+| GreyNoise enrichment | `integrations/greynoise.py` | Live or neutral provenance, scanner/RIOT flags, classification, lookup status, and timestamp |
+| Re-scoring | `cli.py` | Bounded reputation points, an explicit GreyNoise adjustment, provider evidence, and a new scoring trace entry |
 | Aggregation | `cli.py` and `models.py` | Integrity-checked `IncidentReport` with complete evidence and decision trace |
 
-The risk formula is additive and clamped:
+Formula version 1.1 remains additive and clamped:
 
 ```text
-score = clamp(severity_baseline + confidence_adjustment + ip_reputation, 0, 100)
+subtotal = clamp(severity_baseline + confidence_adjustment + ip_reputation, 0, 100)
+score = clamp(subtotal + greynoise_noise_filter, 0, 100)
 ```
 
 IP reputation contributes at most 20 points. A missing reputation value is
-neutral rather than assumed malicious.
+neutral rather than assumed malicious. For an eligible GreyNoise result, the
+filter contribution is `round_half_up(subtotal × 0.25) - subtotal`: 25% of the
+score is retained and 75% is removed. The negative contribution and its
+GreyNoise evidence ID remain visible in the finding.
+
+GreyNoise reduction requires an authoritative, live, matched result and one of
+these exact conditions:
+
+- `classification=benign`; or
+- `noise=true` with `classification=unknown`.
+
+`noise=true` means observed scanner activity, not proof that the actor is safe.
+Consequently, `classification=malicious` overrides the noise filter and adds a
+visible zero-point contribution instead of reducing risk. Mock, offline,
+missing-key, non-global, invalid, failed, and not-found results are neutral and
+cannot lower a score. GreyNoise changes queue priority only; it never deletes or
+modifies a deterministic finding. This distinction follows GreyNoise's official
+[Community response semantics](https://docs.greynoise.io/docs/community-response).
 
 ## Tier 2: LangGraph workflow
 
@@ -178,7 +241,7 @@ START → triage_node → intel_node → response_node → END
 | Node | Responsibility | Authority limit |
 | --- | --- | --- |
 | Triage | Order validated findings and summarize observed attack vectors | Cannot alter findings, scores, evidence, or mappings |
-| Intel | Explain AbuseIPDB provenance and existing ATT&CK context | Mock data is labeled non-authoritative; no mapping is inferred |
+| Intel | Explain AbuseIPDB and GreyNoise provenance plus existing ATT&CK context | Mock data is labeled non-authoritative; no mapping or actor attribution is inferred |
 | Response | Select response focus and request a deterministic playbook | Cannot author commands or execute actions |
 
 The CLI streams node-level `updates` so an operator sees the report summary,
@@ -188,13 +251,16 @@ Triage update, Intel update, Response update, and final playbook in order.
 
 | Condition | Threat intelligence | Agent workflow |
 | --- | --- | --- |
-| `--offline` | Immediate mock result; no HTTP client request | Deterministic local nodes; no OpenAI request |
+| `--offline` | Immediate neutral results from both providers; no HTTP client request | Deterministic local nodes; no OpenAI request |
 | Missing AbuseIPDB key | Mock result labeled `API key is unavailable` | Unaffected |
-| Private, reserved, or special-use IP | Immediate mock result; address is never sent externally | Indicator remains available as report context but is ineligible for a firewall preview |
+| Missing `GREYNOISE_API_KEY` | Neutral result labeled `GreyNoise API key is unavailable`; no request | Unaffected |
+| Private, reserved, or special-use IP | Immediate neutral results; address is never sent externally | Indicator remains available as report context but is ineligible for the agent playbook's executable-looking firewall preview; the separately approved inert artifact uses the normalized-unicast policy below |
+| Global IPv6 source | AbuseIPDB may remain eligible; GreyNoise Community returns a neutral non-global result because this client permits only global IPv4 | Unaffected |
 | AbuseIPDB timeout, HTTP error, or invalid JSON | Mock result labeled as request/validation failure | Unaffected |
+| GreyNoise timeout, HTTP error, or invalid response | Neutral result labeled as request/validation failure | Unaffected |
 | Missing OpenAI key | Unaffected | Lazy client construction is skipped; deterministic fallback |
 | Model error or invalid selection | Unaffected | Provider failure is suppressed and the deterministic fallback completes the graph |
-| No findings | No enrichment request | No containment command; preserve and monitor |
+| No findings | Neither enrichment provider is queried | No containment command; preserve and monitor |
 
 All fallbacks still produce a valid report and playbook. They reduce external
 context, not deterministic detection coverage.
@@ -234,6 +300,56 @@ playbook first previews the current rules and then shows an exact rule revocatio
 with `--dry-run`. Required shell values use `${NAME:?set NAME}` so an unset target
 fails closed.
 
+### Approval receipt and remediation artifact
+
+The dashboard's **Approve & Execute** label means “record approval and generate
+an artifact”; it never means “execute a firewall command.” The browser submits:
+
+- the validated `incident_report` returned by orchestration;
+- the same `report_id` as an explicit binding value;
+- the literal boolean `approval_confirmed: true`;
+- a bounded `approved_by` identity; and
+- an optional bounded, single-line `approval_reason`.
+
+`POST /api/execute-playbook` returns `201 Created` only after it safely writes
+the artifact. Its receipt has `status: artifact_generated` and
+`executed: false`, plus the receipt ID, approval metadata, exact target list,
+artifact SHA-256, size, fixed relative path, mode `0600`, inert-command flag, and
+whether a prior regular artifact was atomically replaced.
+
+The remediation module does not parse the generated playbook. It independently
+selects normalized unicast source IPs associated with deterministic SQLi
+findings, rejects loopback/link-local/multicast/unspecified and reserved non-host
+addresses,
+deduplicates and sorts the remainder, and fails rather than
+silently truncating a report above its 50-target limit. The generated
+`firewall_remediation.sh` contains only commented `iptables` or `ip6tables`
+proposals and commented rollback lines. AutoSOC never invokes the shell, changes
+file mode to executable, or modifies firewall state.
+
+## Container deployment boundary
+
+The checked-in `Dockerfile` uses separate Python 3.12 slim builder and runtime
+stages. The runtime process runs as the non-root `autosoc` user and exposes only
+port 8000. Docker Compose adds a read-only root filesystem, drops every Linux
+capability, enables `no-new-privileges`, bounds process count and logs, supplies a
+`noexec` temporary filesystem, and health-checks `GET /healthz`.
+
+`./data` is the only persistent writable bind mount and appears inside the
+container as `/app/data`; Compose sets `AUTOSOC_DATA_DIR=/app/data`. This mount
+supports both log ingestion and the fixed
+`remediation/firewall_remediation.sh` artifact. `AUTOSOC_UID` and `AUTOSOC_GID`
+must match the host account that owns `./data`, especially on native Linux, so
+the non-root process can create the remediation directory without producing
+unexpected root-owned files.
+
+Live providers remain fail-closed in containers. The Compose default is
+`AUTOSOC_ENABLE_LIVE_PROVIDERS=false`, so API keys alone cannot enable outbound
+provider calls from the web dashboard. Enabling live web providers also requires
+a dashboard password of at least 16 characters; public deployments should retain
+authentication, an exact `AUTOSOC_ALLOWED_HOSTS` list, and a nonzero request
+budget.
+
 ## Sample validation path
 
 [`data/samples/attack_simulation.json`](../data/samples/attack_simulation.json)
@@ -246,4 +362,5 @@ contains 12 newline-delimited JSON events:
 - five benign web/network baselines.
 
 The expected offline result is seven findings, five benign records with zero
-findings, risk 65/100, and one aggregated ATT&CK technique: `T1190`.
+findings, risk 65/100, 14 neutral mocked enrichment records across the two
+providers, and one aggregated ATT&CK technique: `T1190`.

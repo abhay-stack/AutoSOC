@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections import deque
+from datetime import datetime
 import json
 from math import ceil
 from pathlib import Path
@@ -17,13 +18,22 @@ import secrets
 from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, Self
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    IPvAnyAddress,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 from starlette.formparsers import FormParser, MultiPartException, MultiPartParser
@@ -34,8 +44,15 @@ from autosoc.cli import AnalysisError, analyze_file
 from autosoc.config import load_setting
 from autosoc.models import IncidentReport
 from autosoc.parsers.log_parser import LogFormat
+from autosoc.web.remediation import (
+    NoRemediationTargetsError,
+    RemediationError,
+    TooManyRemediationTargetsError,
+    generate_firewall_remediation,
+)
 
 MAX_LOG_BYTES = 2 * 1024 * 1024
+MAX_APPROVAL_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_REQUEST_OVERHEAD = 64 * 1024
 _MAX_REQUEST_BYTES = MAX_LOG_BYTES + _MAX_REQUEST_OVERHEAD
 _READ_CHUNK_BYTES = 64 * 1024
@@ -266,8 +283,10 @@ async def dashboard_security_boundary(
     """Authenticate, bound public use, and attach dashboard security headers."""
 
     is_health_check = request.url.path == "/healthz"
-    is_orchestration = (
-        request.url.path == "/api/orchestrate" and request.method == "POST"
+    is_rate_limited_api = (
+        request.url.path
+        in {"/api/orchestrate", "/api/execute-playbook"}
+        and request.method == "POST"
     )
     if not is_health_check and not _has_valid_basic_auth(request):
         response: Response = JSONResponse(
@@ -291,7 +310,7 @@ async def dashboard_security_boundary(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Cross-origin API requests are not allowed."},
             )
-        elif is_orchestration and (
+        elif is_rate_limited_api and (
             retry_after := _RATE_LIMITER.consume()
         ) is not None:
             response = JSONResponse(
@@ -317,7 +336,7 @@ async def dashboard_security_boundary(
     response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
-    if is_orchestration and _RATE_LIMIT_PER_MINUTE:
+    if is_rate_limited_api and _RATE_LIMIT_PER_MINUTE:
         response.headers.setdefault(
             "X-RateLimit-Limit",
             str(_RATE_LIMIT_PER_MINUTE),
@@ -347,6 +366,80 @@ class OrchestrationResponse(BaseModel):
     incident_report: IncidentReport
     agent_thread: list[AgentThreadEntry]
     playbook: str = Field(min_length=1)
+
+
+class PlaybookApprovalRequest(BaseModel):
+    """Bounded, explicit human approval tied to one validated incident report."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    incident_report: IncidentReport
+    report_id: UUID
+    approval_confirmed: Literal[True]
+    approved_by: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._@+:-]{0,127}$",
+    )
+    approval_reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("approval_confirmed", mode="before")
+    @classmethod
+    def require_literal_boolean_approval(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("approval_confirmed must be the boolean true")
+        return value
+
+    @field_validator("approval_reason")
+    @classmethod
+    def reject_control_characters(cls, value: str | None) -> str | None:
+        if value is not None and any(ord(character) < 32 for character in value):
+            raise ValueError("approval_reason must be a single line")
+        if value is not None and "\x7f" in value:
+            raise ValueError("approval_reason contains a control character")
+        return value
+
+    @model_validator(mode="after")
+    def validate_report_binding(self) -> Self:
+        if self.report_id != self.incident_report.report_id:
+            raise ValueError("report_id must match incident_report.report_id")
+        return self
+
+
+class RemediationArtifactReceipt(BaseModel):
+    """Integrity and safety properties of the generated local artifact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: Literal["remediation/firewall_remediation.sh"]
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    size_bytes: int = Field(gt=0, le=64 * 1024)
+    file_mode: Literal["0600"] = "0600"
+    command_lines_inert: Literal[True] = True
+    replaced_existing: bool
+
+
+class PlaybookExecutionResponse(BaseModel):
+    """Auditable receipt proving generation without host command execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["artifact_generated"] = "artifact_generated"
+    executed: Literal[False] = False
+    report_id: UUID
+    receipt_id: UUID
+    approved_by: str
+    approval_reason: str | None = None
+    approved_at: datetime
+    targets: list[IPvAnyAddress] = Field(min_length=1, max_length=50)
+    artifact: RemediationArtifactReceipt
+    safety_notice: Literal[
+        "No firewall command was executed; the generated artifact is an inert, "
+        "comment-only preview."
+    ] = (
+        "No firewall command was executed; the generated artifact is an inert, "
+        "comment-only preview."
+    )
 
 
 class _RequestInput(NamedTuple):
@@ -608,6 +701,63 @@ async def _extract_request_input(request: Request) -> _RequestInput:
     )
 
 
+async def _extract_approval_request(request: Request) -> PlaybookApprovalRequest:
+    media_type = request.headers.get("content-type", "").partition(";")[0]
+    if media_type.strip().lower() != "application/json":
+        raise _http_error(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            "Playbook approval requests must use application/json.",
+        )
+
+    value = request.headers.get("content-length")
+    if value is not None:
+        try:
+            content_length = int(value)
+        except ValueError:
+            raise _http_error(
+                status.HTTP_400_BAD_REQUEST,
+                "Content-Length must be a valid non-negative integer.",
+            ) from None
+        if content_length < 0:
+            raise _http_error(
+                status.HTTP_400_BAD_REQUEST,
+                "Content-Length must be a valid non-negative integer.",
+            )
+        if content_length > MAX_APPROVAL_REQUEST_BYTES:
+            raise _http_error(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                "Playbook approval request is too large.",
+            )
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_APPROVAL_REQUEST_BYTES:
+            raise _http_error(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                "Playbook approval request is too large.",
+            )
+    try:
+        payload = json.loads(_decode_utf8(bytes(body)))
+    except json.JSONDecodeError:
+        raise _http_error(
+            status.HTTP_400_BAD_REQUEST,
+            "Request body must contain a valid JSON object.",
+        ) from None
+    if not isinstance(payload, dict):
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Request body must be a JSON object.",
+        )
+    try:
+        return PlaybookApprovalRequest.model_validate(payload)
+    except ValidationError:
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Playbook approval request failed validation.",
+        ) from None
+
+
 def _sanitise_web_report(report: IncidentReport) -> IncidentReport:
     """Remove ephemeral server paths before a report crosses the API boundary."""
 
@@ -764,9 +914,77 @@ async def orchestrate_logs(request: Request) -> OrchestrationResponse:
         ) from None
 
 
+@app.post(
+    "/api/execute-playbook",
+    response_model=PlaybookExecutionResponse,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate an approved, inert firewall remediation artifact",
+)
+async def execute_playbook(request: Request) -> PlaybookExecutionResponse:
+    """Generate a comment-only script; never execute containment commands."""
+
+    try:
+        approval = await _extract_approval_request(request)
+        generated = await run_in_threadpool(
+            generate_firewall_remediation,
+            approval.incident_report,
+            approved_by=approval.approved_by,
+        )
+        return PlaybookExecutionResponse(
+            report_id=generated.report_id,
+            receipt_id=generated.receipt_id,
+            approved_by=generated.approved_by,
+            approval_reason=approval.approval_reason,
+            approved_at=generated.approved_at,
+            targets=list(generated.targets),
+            artifact=RemediationArtifactReceipt(
+                path=generated.artifact_path,
+                sha256=generated.artifact_sha256,
+                size_bytes=generated.artifact_size_bytes,
+                replaced_existing=generated.replaced_existing,
+            ),
+        )
+    except HTTPException:
+        raise
+    except NoRemediationTargetsError:
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            (
+                "No eligible firewall target is backed by a deterministic "
+                "SQL-injection finding."
+            ),
+        ) from None
+    except TooManyRemediationTargetsError:
+        raise _http_error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "The incident exceeds the firewall target approval limit.",
+        ) from None
+    except RemediationError:
+        raise _http_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            (
+                "Remediation generation failed safely; no containment action "
+                "was executed."
+            ),
+        ) from None
+    except Exception:
+        raise _http_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            (
+                "Remediation generation failed safely; no containment action "
+                "was executed."
+            ),
+        ) from None
+
+
 __all__ = [
     "AgentThreadEntry",
+    "MAX_APPROVAL_REQUEST_BYTES",
     "MAX_LOG_BYTES",
     "OrchestrationResponse",
+    "PlaybookApprovalRequest",
+    "PlaybookExecutionResponse",
+    "RemediationArtifactReceipt",
     "app",
 ]

@@ -463,6 +463,111 @@
                   </p>
                 </div>
                 <pre id="playbookContent" tabindex="0" class="scrollbar-thin max-h-[38rem] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-white/[0.07] bg-[#080b0e] p-4 font-mono text-[11px] leading-[1.75] text-slate-300 outline-none focus:ring-2 focus:ring-signal-amber/50"></pre>
+
+                <div id="approvalGate" class="mt-5 overflow-hidden rounded-xl border border-signal-amber/20 bg-[#0a0d10]">
+                  <div class="flex flex-col gap-3 border-b border-white/[0.06] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p class="font-mono text-[9px] uppercase tracking-[0.18em] text-signal-amber">04 / Controlled handoff</p>
+                      <h5 class="mt-1 text-xs font-semibold text-slate-200">Authorize remediation artifact generation</h5>
+                    </div>
+                    <span class="w-fit rounded-md border border-signal-green/20 bg-signal-green/[0.055] px-2 py-1 font-mono text-[8px] uppercase tracking-[0.14em] text-signal-green">
+                      Generates only · never invokes shell
+                    </span>
+                  </div>
+
+                  <div class="space-y-4 p-4">
+                    <p id="executionSafetyCopy" class="max-w-3xl text-[11px] leading-5 text-slate-500">
+                      Approval writes a local <span class="font-mono text-slate-400">firewall_remediation.sh</span> receipt with every mutation commented out. AutoSOC does not execute the artifact or modify the host firewall.
+                    </p>
+
+                    <div class="grid gap-3 md:grid-cols-[minmax(0,0.72fr)_minmax(0,1.28fr)]">
+                      <div>
+                        <label for="approvedBy" class="mb-1.5 block text-[10px] font-medium text-slate-400">Approver identity</label>
+                        <input
+                          id="approvedBy"
+                          name="approved_by"
+                          type="text"
+                          required
+                          maxlength="128"
+                          pattern="[A-Za-z0-9][A-Za-z0-9 ._@+:-]{0,127}"
+                          autocomplete="name"
+                          placeholder="Analyst name or handle"
+                          aria-describedby="executionSafetyCopy executionError"
+                          class="h-10 w-full rounded-lg border border-white/[0.09] bg-black/20 px-3 text-xs text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-signal-amber/45 focus:ring-2 focus:ring-signal-amber/10"
+                        >
+                      </div>
+                      <div>
+                        <label for="approvalReason" class="mb-1.5 block text-[10px] font-medium text-slate-400">Approval note <span class="text-slate-700">(optional)</span></label>
+                        <input
+                          id="approvalReason"
+                          name="approval_reason"
+                          type="text"
+                          maxlength="500"
+                          placeholder="Change ticket or containment rationale"
+                          aria-describedby="executionSafetyCopy executionError"
+                          class="h-10 w-full rounded-lg border border-white/[0.09] bg-black/20 px-3 text-xs text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-signal-amber/45 focus:ring-2 focus:ring-signal-amber/10"
+                        >
+                      </div>
+                    </div>
+
+                    <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-white/[0.07] bg-white/[0.018] px-3 py-3 transition hover:border-signal-amber/20">
+                      <input id="approvalConfirmed" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 accent-[#f4b860] focus-visible:ring-2 focus-visible:ring-signal-amber focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0d10]">
+                      <span class="text-[11px] leading-5 text-slate-400">
+                        I reviewed the deterministic evidence, validated the target scope, and approve generation of the inert remediation artifact for this report.
+                      </span>
+                    </label>
+
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <p id="executionError" class="hidden text-[11px] leading-5 text-signal-red" role="alert"></p>
+                      <button
+                        id="executePlaybook"
+                        type="button"
+                        disabled
+                        aria-describedby="executionSafetyCopy"
+                        class="group inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-signal-amber/35 bg-signal-amber/[0.11] px-4 py-2.5 text-xs font-semibold text-signal-amber transition hover:border-signal-amber/60 hover:bg-signal-amber/[0.16] focus:outline-none focus:ring-2 focus:ring-signal-amber focus:ring-offset-2 focus:ring-offset-[#0a0d10] disabled:cursor-not-allowed disabled:border-white/[0.07] disabled:bg-white/[0.025] disabled:text-slate-700 sm:ml-auto"
+                      >
+                        <svg id="executeIcon" viewBox="0 0 24 24" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                          <path d="M12 3 5 6v5c0 4.1 2.5 7.7 7 10 4.5-2.3 7-5.9 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-4"/>
+                        </svg>
+                        <svg id="executeLoadingIcon" viewBox="0 0 24 24" fill="none" class="hidden h-4 w-4 animate-spin" aria-hidden="true">
+                          <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                        </svg>
+                        <span id="executeLabel">Approve &amp; Execute</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="executionReceipt" tabindex="-1" class="mt-5 hidden overflow-hidden rounded-xl border border-signal-green/25 bg-signal-green/[0.045] outline-none focus:ring-2 focus:ring-signal-green/50" role="status" aria-live="polite">
+                  <div class="grid gap-px bg-signal-green/15 md:grid-cols-[minmax(0,1fr)_auto]">
+                    <div class="bg-[#0b1110] p-4">
+                      <div class="flex items-start gap-3">
+                        <div class="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-signal-green/25 bg-signal-green/10 text-signal-green" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none" class="h-4 w-4" stroke="currentColor" stroke-width="1.8"><path d="m5 12 4 4L19 6"/></svg>
+                        </div>
+                        <div class="min-w-0">
+                          <p class="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-signal-green">Artifact generated · commands not executed</p>
+                          <p class="mt-1 text-xs font-medium text-slate-200">Local remediation handoff is ready for inspection</p>
+                          <p id="receiptPath" class="mt-2 break-all font-mono text-[10px] leading-5 text-slate-500"></p>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="grid min-w-[14rem] grid-cols-2 gap-px bg-signal-green/15">
+                      <div class="bg-[#0b1110] p-4">
+                        <p class="font-mono text-[8px] uppercase tracking-wider text-slate-600">Targets</p>
+                        <p id="receiptTargets" class="mt-2 font-mono text-sm text-signal-green">0</p>
+                      </div>
+                      <div class="bg-[#0b1110] p-4">
+                        <p class="font-mono text-[8px] uppercase tracking-wider text-slate-600">Receipt</p>
+                        <p id="receiptId" class="mt-2 truncate font-mono text-[10px] text-slate-400"></p>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="border-t border-signal-green/15 bg-black/10 px-4 py-3">
+                    <p class="font-mono text-[8px] uppercase tracking-[0.14em] text-slate-600">SHA-256</p>
+                    <p id="receiptHash" class="mt-1 break-all font-mono text-[9px] leading-4 text-slate-500"></p>
+                  </div>
+                </div>
               </div>
             </section>
           </div>
@@ -497,6 +602,19 @@
       const loadingState = document.getElementById("loadingState");
       const errorState = document.getElementById("errorState");
       const resultsState = document.getElementById("resultsState");
+      const approvedBy = document.getElementById("approvedBy");
+      const approvalReason = document.getElementById("approvalReason");
+      const approvalConfirmed = document.getElementById("approvalConfirmed");
+      const executePlaybook = document.getElementById("executePlaybook");
+      const executeLabel = document.getElementById("executeLabel");
+      const executeIcon = document.getElementById("executeIcon");
+      const executeLoadingIcon = document.getElementById("executeLoadingIcon");
+      const executionError = document.getElementById("executionError");
+      const executionReceipt = document.getElementById("executionReceipt");
+
+      let currentIncidentReport = null;
+      let executionBusy = false;
+      let executionComplete = false;
 
       const views = { empty: emptyState, loading: loadingState, error: errorState, results: resultsState };
 
@@ -519,6 +637,52 @@
         buttonText.textContent = isBusy ? "Analyzing evidence…" : "Analyze & Orchestrate";
         analyzeIcon.classList.toggle("hidden", isBusy);
         loadingIcon.classList.toggle("hidden", !isBusy);
+      }
+
+      function approverIsValid() {
+        return /^[A-Za-z0-9][A-Za-z0-9 ._@+:-]{0,127}$/.test(approvedBy.value.trim());
+      }
+
+      function updateExecutionButton() {
+        executePlaybook.disabled = (
+          executionBusy ||
+          executionComplete ||
+          !currentIncidentReport ||
+          !approvalConfirmed.checked ||
+          !approverIsValid()
+        );
+      }
+
+      function setExecutionBusy(isBusy) {
+        executionBusy = isBusy;
+        approvedBy.disabled = isBusy || executionComplete;
+        approvalReason.disabled = isBusy || executionComplete;
+        approvalConfirmed.disabled = isBusy || executionComplete;
+        executePlaybook.setAttribute("aria-busy", String(isBusy));
+        executeIcon.classList.toggle("hidden", isBusy);
+        executeLoadingIcon.classList.toggle("hidden", !isBusy);
+        executeLabel.textContent = isBusy
+          ? "Generating artifact…"
+          : (executionComplete ? "Artifact generated" : "Approve & Execute");
+        updateExecutionButton();
+      }
+
+      function resetExecutionGate() {
+        executionBusy = false;
+        executionComplete = false;
+        approvedBy.value = "";
+        approvalReason.value = "";
+        approvalConfirmed.checked = false;
+        approvedBy.disabled = false;
+        approvalReason.disabled = false;
+        approvalConfirmed.disabled = false;
+        executionError.textContent = "";
+        executionError.classList.add("hidden");
+        executionReceipt.classList.add("hidden");
+        executeIcon.classList.remove("hidden");
+        executeLoadingIcon.classList.add("hidden");
+        executeLabel.textContent = "Approve & Execute";
+        updateExecutionButton();
       }
 
       function updateInputMode() {
@@ -694,6 +858,8 @@
         const severity = severityFor(risk);
         const findings = Array.isArray(report.findings) ? report.findings : [];
         const reportId = report.report_id ? String(report.report_id) : "report id unavailable";
+        currentIncidentReport = report;
+        resetExecutionGate();
 
         const riskRing = document.getElementById("riskRing");
         riskRing.style.setProperty("--risk-value", String(risk));
@@ -755,6 +921,8 @@
         formData.append("log_format", logFormat.value);
 
         setBusy(true);
+        currentIncidentReport = null;
+        resetExecutionGate();
         setView("loading");
         announce("Analysis started. AutoSOC is evaluating deterministic rules and orchestrating grounded agent summaries.");
 
@@ -816,6 +984,86 @@
           announce("Clipboard access is unavailable. Select the playbook text to copy it manually.");
         }
         window.setTimeout(() => { label.textContent = "Copy playbook"; }, 1800);
+      });
+
+      approvedBy.addEventListener("input", updateExecutionButton);
+      approvalConfirmed.addEventListener("change", updateExecutionButton);
+
+      executePlaybook.addEventListener("click", async () => {
+        executionError.textContent = "";
+        executionError.classList.add("hidden");
+
+        const identity = approvedBy.value.trim();
+        if (!currentIncidentReport) {
+          executionError.textContent = "Analyze an incident before approving a remediation artifact.";
+          executionError.classList.remove("hidden");
+          return;
+        }
+        if (!approverIsValid()) {
+          executionError.textContent = "Enter an approver name or handle beginning with a letter or number; . _ @ + : - are also allowed.";
+          executionError.classList.remove("hidden");
+          approvedBy.focus();
+          return;
+        }
+        if (!approvalConfirmed.checked) {
+          executionError.textContent = "Confirm that the deterministic scope was reviewed before continuing.";
+          executionError.classList.remove("hidden");
+          approvalConfirmed.focus();
+          return;
+        }
+
+        const requestBody = {
+          incident_report: currentIncidentReport,
+          report_id: currentIncidentReport.report_id,
+          approval_confirmed: true,
+          approved_by: identity
+        };
+        const reason = approvalReason.value.trim();
+        if (reason) requestBody.approval_reason = reason;
+
+        setExecutionBusy(true);
+        announce("Approval recorded. AutoSOC is generating an inert local remediation artifact; no command will be executed.");
+
+        try {
+          const response = await fetch("/api/execute-playbook", {
+            method: "POST",
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(requestBody)
+          });
+
+          let payload;
+          try {
+            payload = await response.json();
+          } catch (_error) {
+            throw new Error(response.ok ? "The server returned an invalid artifact receipt." : `Artifact request failed with status ${response.status}.`);
+          }
+          if (!response.ok) {
+            throw new Error(detailMessage(payload, `Artifact request failed with status ${response.status}.`));
+          }
+          if (!payload || payload.executed !== false || !payload.artifact) {
+            throw new Error("The server did not return a valid non-execution receipt.");
+          }
+
+          executionComplete = true;
+          document.getElementById("receiptPath").textContent = payload.artifact.path || "firewall_remediation.sh";
+          document.getElementById("receiptHash").textContent = payload.artifact.sha256 || "checksum unavailable";
+          document.getElementById("receiptTargets").textContent = Array.isArray(payload.targets) ? String(payload.targets.length) : "0";
+          document.getElementById("receiptId").textContent = payload.receipt_id || "recorded";
+          document.getElementById("receiptId").title = payload.receipt_id || "recorded";
+          executionReceipt.classList.remove("hidden");
+          setExecutionBusy(false);
+          announce("Remediation artifact generated safely. No firewall command was executed.");
+          executionReceipt.focus({ preventScroll: true });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "The remediation artifact could not be generated.";
+          executionError.textContent = message;
+          executionError.classList.remove("hidden");
+          announce(`Artifact generation failed safely. ${message}`);
+          setExecutionBusy(false);
+        }
       });
 
       logFormat.addEventListener("change", updateInputMode);

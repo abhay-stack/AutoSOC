@@ -2,6 +2,7 @@
 
 from autosoc.scoring.risk import (
     FORMULA_VERSION,
+    GREYNOISE_RETAINED_FRACTION,
     RiskAssessment,
     calculate_risk_score,
     severity_from_score,
@@ -9,6 +10,7 @@ from autosoc.scoring.risk import (
 
 __all__ = [
     "FORMULA_VERSION",
+    "GREYNOISE_RETAINED_FRACTION",
     "RiskAssessment",
     "calculate_risk_score",
     "severity_from_score",

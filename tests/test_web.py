@@ -73,6 +73,10 @@ class WebDashboardTests(unittest.TestCase):
         self.assertIn("AutoSOC", response.text)
         self.assertIn("Analyze &amp; Orchestrate", response.text)
         self.assertIn("/api/orchestrate", response.text)
+        self.assertIn("/api/execute-playbook", response.text)
+        self.assertIn("Approve &amp; Execute", response.text)
+        self.assertIn("Generates only · never invokes shell", response.text)
+        self.assertIn("Artifact generated · commands not executed", response.text)
         self.assertIn("PENDING HUMAN APPROVAL", response.text)
         self.assertIn("tailwindcss.com", response.text)
 
@@ -217,6 +221,11 @@ class WebDashboardTests(unittest.TestCase):
                 side_effect=AssertionError("offline request reached AbuseIPDB"),
             ) as abuse_request,
             patch(
+                "autosoc.integrations.greynoise.GreyNoiseClient._request",
+                new_callable=AsyncMock,
+                side_effect=AssertionError("offline request reached GreyNoise"),
+            ) as greynoise_request,
+            patch(
                 "autosoc.agents.nodes.create_chat_model",
                 side_effect=AssertionError("offline request created an LLM client"),
             ) as model_factory,
@@ -228,6 +237,7 @@ class WebDashboardTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         abuse_request.assert_not_awaited()
+        greynoise_request.assert_not_awaited()
         model_factory.assert_not_called()
 
         payload = response.json()
@@ -241,6 +251,13 @@ class WebDashboardTests(unittest.TestCase):
         self.assertTrue(report.threat_intelligence)
         self.assertTrue(
             all(item.mode.value == "mock" for item in report.threat_intelligence)
+        )
+        self.assertTrue(report.greynoise_intelligence)
+        self.assertTrue(
+            all(
+                item.mode.value == "mock"
+                for item in report.greynoise_intelligence
+            )
         )
 
         thread = payload["agent_thread"]
@@ -340,12 +357,21 @@ class WebDashboardTests(unittest.TestCase):
                 "autosoc.integrations.abuseipdb.load_setting",
                 return_value=None,
             ),
+            patch(
+                "autosoc.integrations.greynoise.load_setting",
+                return_value=None,
+            ),
             patch("autosoc.agents.nodes.load_setting", return_value=None),
             patch(
                 "autosoc.integrations.abuseipdb.AbuseIPDBClient._request",
                 new_callable=AsyncMock,
                 side_effect=AssertionError("missing-key request reached provider"),
             ) as abuse_request,
+            patch(
+                "autosoc.integrations.greynoise.GreyNoiseClient._request",
+                new_callable=AsyncMock,
+                side_effect=AssertionError("missing-key request reached provider"),
+            ) as greynoise_request,
         ):
             response = self.client.post(
                 "/api/orchestrate",
@@ -359,12 +385,19 @@ class WebDashboardTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         abuse_request.assert_not_awaited()
+        greynoise_request.assert_not_awaited()
         payload = response.json()
         self.assertFalse(payload["incident_report"]["offline_mode"])
         self.assertTrue(
             all(
                 item["mode"] == "mock"
                 for item in payload["incident_report"]["threat_intelligence"]
+            )
+        )
+        self.assertTrue(
+            all(
+                item["mode"] == "mock"
+                for item in payload["incident_report"]["greynoise_intelligence"]
             )
         )
         self.assertTrue(
@@ -383,6 +416,11 @@ class WebDashboardTests(unittest.TestCase):
                 new_callable=AsyncMock,
                 side_effect=AssertionError("disabled live mode reached AbuseIPDB"),
             ) as abuse_request,
+            patch(
+                "autosoc.integrations.greynoise.GreyNoiseClient._request",
+                new_callable=AsyncMock,
+                side_effect=AssertionError("disabled live mode reached GreyNoise"),
+            ) as greynoise_request,
             patch(
                 "autosoc.agents.nodes.create_chat_model",
                 side_effect=AssertionError("disabled live mode created a model"),
@@ -406,6 +444,7 @@ class WebDashboardTests(unittest.TestCase):
         self.assertIn("disabled by server policy", detail)
         analyze.assert_not_awaited()
         abuse_request.assert_not_awaited()
+        greynoise_request.assert_not_awaited()
         model_factory.assert_not_called()
 
     def test_global_rate_limiter_uses_a_sliding_window(self) -> None:

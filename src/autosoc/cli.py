@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -18,10 +19,14 @@ from autosoc.agents.graph import build_graph
 from autosoc.detectors.sqli import detect_sqli
 from autosoc.detectors.weak_tls import detect_weak_tls
 from autosoc.integrations.abuseipdb import AbuseIPDBClient
+from autosoc.integrations.greynoise import GreyNoiseClient
 from autosoc.models import (
     DecisionTraceEntry,
     DetectionFinding,
     Evidence,
+    GreyNoiseClassification,
+    GreyNoiseLookupStatus,
+    GreyNoiseResult,
     IncidentReport,
     IncidentStatus,
     MitreAttackMapping,
@@ -104,28 +109,70 @@ def _run_detectors(events: list[SecurityEvent]) -> list[DetectionFinding]:
     return findings
 
 
+def _abuseipdb_trace_outcome(result: ThreatIntelResult) -> TraceOutcome:
+    if result.mode == ThreatIntelMode.LIVE:
+        return TraceOutcome.COMPLETED
+    if result.retrieval_reason == (
+        "AbuseIPDB request or response validation failed"
+    ):
+        return TraceOutcome.FAILED
+    return TraceOutcome.SKIPPED
+
+
+def _greynoise_trace_outcome(result: GreyNoiseResult) -> TraceOutcome:
+    if result.mode == ThreatIntelMode.LIVE:
+        return TraceOutcome.COMPLETED
+    if result.lookup_status == GreyNoiseLookupStatus.PROVIDER_ERROR:
+        return TraceOutcome.FAILED
+    return TraceOutcome.SKIPPED
+
+
 def _rescore_finding(
     finding: DetectionFinding,
-    intel: ThreatIntelResult,
+    abuse_intel: ThreatIntelResult,
+    greynoise_intel: GreyNoiseResult,
 ) -> DetectionFinding:
     original_evidence_ids = [item.evidence_id for item in finding.evidence]
-    intel_evidence = Evidence(
+    abuse_evidence = Evidence(
         event_id=finding.event_id,
         source_field="threat_intelligence.abuseipdb.abuse_confidence_score",
-        observed_value=intel.abuse_confidence_score,
+        observed_value=abuse_intel.abuse_confidence_score,
         description=(
-            f"AbuseIPDB {intel.mode.value} enrichment returned score "
-            f"{intel.abuse_confidence_score}/100 for "
-            f"{str(intel.ip_address) if intel.ip_address else 'a missing IP'}; "
-            f"reason: {intel.retrieval_reason}."
+            f"AbuseIPDB {abuse_intel.mode.value} enrichment returned score "
+            f"{abuse_intel.abuse_confidence_score}/100 for "
+            f"{str(abuse_intel.ip_address) if abuse_intel.ip_address else 'a missing IP'}; "
+            f"reason: {abuse_intel.retrieval_reason}."
+        ),
+    )
+    greynoise_evidence = Evidence(
+        event_id=finding.event_id,
+        source_field="threat_intelligence.greynoise.noise_filter",
+        observed_value={
+            "noise": greynoise_intel.noise,
+            "riot": greynoise_intel.riot,
+            "classification": (
+                greynoise_intel.classification.value
+                if greynoise_intel.classification is not None
+                else None
+            ),
+            "mode": greynoise_intel.mode.value,
+            "lookup_status": greynoise_intel.lookup_status.value,
+        },
+        description=(
+            f"GreyNoise {greynoise_intel.mode.value} enrichment returned "
+            f"status {greynoise_intel.lookup_status.value} for "
+            f"{str(greynoise_intel.ip_address) if greynoise_intel.ip_address else 'a missing IP'}; "
+            f"reason: {greynoise_intel.retrieval_reason}."
         ),
     )
     risk = calculate_risk_score(
         finding.severity,
         finding.confidence_score,
-        intel.abuse_confidence_score,
+        abuse_intel.abuse_confidence_score,
         evidence_ids=original_evidence_ids,
-        ip_reputation_evidence_ids=[intel_evidence.evidence_id],
+        ip_reputation_evidence_ids=[abuse_evidence.evidence_id],
+        greynoise_result=greynoise_intel,
+        greynoise_evidence_ids=[greynoise_evidence.evidence_id],
     )
     trace = list(finding.decision_trace)
     trace.extend(
@@ -135,29 +182,51 @@ def _rescore_finding(
                 stage=TraceStage.ENRICHMENT,
                 component="abuseipdb_client",
                 operation="retrieve or safely mock source-IP reputation",
-                outcome=(
-                    TraceOutcome.COMPLETED
-                    if intel.mode == ThreatIntelMode.LIVE
-                    else TraceOutcome.SKIPPED
-                ),
+                outcome=_abuseipdb_trace_outcome(abuse_intel),
                 rule_id=finding.rule_id,
-                evidence_ids=[intel_evidence.evidence_id],
+                evidence_ids=[abuse_evidence.evidence_id],
                 details={
-                    "provider": intel.provider,
-                    "mode": intel.mode.value,
-                    "retrieval_reason": intel.retrieval_reason,
-                    "country_code": intel.country_code,
-                    "usage_type": intel.usage_type,
+                    "provider": abuse_intel.provider,
+                    "mode": abuse_intel.mode.value,
+                    "retrieval_reason": abuse_intel.retrieval_reason,
+                    "country_code": abuse_intel.country_code,
+                    "usage_type": abuse_intel.usage_type,
                 },
             ),
             DecisionTraceEntry(
                 sequence=len(trace) + 2,
+                stage=TraceStage.ENRICHMENT,
+                component="greynoise_client",
+                operation="classify source IP as scanner noise or benign traffic",
+                outcome=_greynoise_trace_outcome(greynoise_intel),
+                rule_id=finding.rule_id,
+                evidence_ids=[greynoise_evidence.evidence_id],
+                details={
+                    "provider": greynoise_intel.provider,
+                    "mode": greynoise_intel.mode.value,
+                    "lookup_status": greynoise_intel.lookup_status.value,
+                    "noise": greynoise_intel.noise,
+                    "riot": greynoise_intel.riot,
+                    "classification": (
+                        greynoise_intel.classification.value
+                        if greynoise_intel.classification is not None
+                        else None
+                    ),
+                    "risk_reduction_eligible": (
+                        greynoise_intel.risk_reduction_eligible
+                    ),
+                    "retrieval_reason": greynoise_intel.retrieval_reason,
+                },
+            ),
+            DecisionTraceEntry(
+                sequence=len(trace) + 3,
                 stage=TraceStage.SCORING,
                 component="risk_scorer",
-                operation="recalculate risk with IP reputation",
+                operation="recalculate risk with reputation and noise filtering",
                 outcome=TraceOutcome.CALCULATED,
                 rule_id=finding.rule_id,
-                evidence_ids=original_evidence_ids + [intel_evidence.evidence_id],
+                evidence_ids=original_evidence_ids
+                + [abuse_evidence.evidence_id, greynoise_evidence.evidence_id],
                 details=risk.trace_details(),
             ),
         ]
@@ -167,7 +236,7 @@ def _rescore_finding(
     values.update(
         risk_score=risk.score,
         risk_score_components=list(risk.components),
-        evidence=[*finding.evidence, intel_evidence],
+        evidence=[*finding.evidence, abuse_evidence, greynoise_evidence],
         decision_trace=trace,
     )
     return DetectionFinding.model_validate(values)
@@ -176,8 +245,13 @@ def _rescore_finding(
 async def _enrich_findings(
     events: list[SecurityEvent],
     findings: list[DetectionFinding],
-    client: AbuseIPDBClient,
-) -> tuple[list[DetectionFinding], list[ThreatIntelResult]]:
+    abuse_client: AbuseIPDBClient,
+    greynoise_client: GreyNoiseClient,
+) -> tuple[
+    list[DetectionFinding],
+    list[ThreatIntelResult],
+    list[GreyNoiseResult],
+]:
     events_by_id = {event.event_id: event for event in events}
     source_keys: list[str | None] = []
     for finding in findings:
@@ -188,16 +262,28 @@ async def _enrich_findings(
 
     # Deliberately sequential to respect provider rate limits; results are cached
     # by source IP and reused for every finding from that event.
-    intel_by_ip: dict[str | None, ThreatIntelResult] = {}
+    abuse_by_ip: dict[str | None, ThreatIntelResult] = {}
+    greynoise_by_ip: dict[str | None, GreyNoiseResult] = {}
     for source_ip in source_keys:
-        intel_by_ip[source_ip] = await client.check_ip(source_ip)
+        abuse_by_ip[source_ip] = await abuse_client.check_ip(source_ip)
+        greynoise_by_ip[source_ip] = await greynoise_client.check_ip(source_ip)
 
     enriched_findings: list[DetectionFinding] = []
     for finding in findings:
         event = events_by_id[finding.event_id]
         key = str(event.source_ip) if event.source_ip is not None else None
-        enriched_findings.append(_rescore_finding(finding, intel_by_ip[key]))
-    return enriched_findings, list(intel_by_ip.values())
+        enriched_findings.append(
+            _rescore_finding(
+                finding,
+                abuse_by_ip[key],
+                greynoise_by_ip[key],
+            )
+        )
+    return (
+        enriched_findings,
+        list(abuse_by_ip.values()),
+        list(greynoise_by_ip.values()),
+    )
 
 
 def _aggregate_mitre_mappings(
@@ -222,11 +308,38 @@ def _build_report(
     events: list[SecurityEvent],
     findings: list[DetectionFinding],
     threat_intelligence: list[ThreatIntelResult],
+    greynoise_intelligence: list[GreyNoiseResult],
 ) -> IncidentReport:
-    live_count = sum(
+    abuse_live_count = sum(
         result.mode == ThreatIntelMode.LIVE for result in threat_intelligence
     )
-    mock_count = len(threat_intelligence) - live_count
+    abuse_mock_count = len(threat_intelligence) - abuse_live_count
+    abuse_failure_count = sum(
+        _abuseipdb_trace_outcome(result) == TraceOutcome.FAILED
+        for result in threat_intelligence
+    )
+    greynoise_live_count = sum(
+        result.mode == ThreatIntelMode.LIVE
+        for result in greynoise_intelligence
+    )
+    greynoise_mock_count = len(greynoise_intelligence) - greynoise_live_count
+    greynoise_failure_count = sum(
+        result.lookup_status == GreyNoiseLookupStatus.PROVIDER_ERROR
+        for result in greynoise_intelligence
+    )
+    greynoise_status_counts = {
+        status.value: sum(
+            result.lookup_status == status
+            for result in greynoise_intelligence
+        )
+        for status in GreyNoiseLookupStatus
+        if any(
+            result.lookup_status == status
+            for result in greynoise_intelligence
+        )
+    }
+    live_count = abuse_live_count + greynoise_live_count
+    mock_count = abuse_mock_count + greynoise_mock_count
     all_evidence_ids = [
         evidence.evidence_id
         for finding in findings
@@ -254,8 +367,8 @@ def _build_report(
         summary = (
             f"Analyzed {len(events)} event(s) and produced {len(findings)} "
             f"deterministic finding(s). Highest risk score: "
-            f"{overall_risk_score}/100. Threat intelligence: {live_count} live, "
-            f"{mock_count} mocked."
+            f"{overall_risk_score}/100. Threat-intelligence provider results: "
+            f"{live_count} live, {mock_count} mocked."
         )
         confidence_basis = (
             "Arithmetic mean of deterministic detector confidence scores; no LLM "
@@ -281,11 +394,17 @@ def _build_report(
             evidence_ids=highest_risk_evidence_ids,
         )
     ]
-    intel_evidence_ids = [
+    abuse_evidence_ids = [
         evidence.evidence_id
         for finding in findings
         for evidence in finding.evidence
-        if evidence.source_field.startswith("threat_intelligence.")
+        if evidence.source_field.startswith("threat_intelligence.abuseipdb.")
+    ]
+    greynoise_evidence_ids = [
+        evidence.evidence_id
+        for finding in findings
+        for evidence in finding.evidence
+        if evidence.source_field.startswith("threat_intelligence.greynoise.")
     ]
     report_trace = [
         DecisionTraceEntry(
@@ -309,21 +428,59 @@ def _build_report(
             sequence=3,
             stage=TraceStage.ENRICHMENT,
             component="abuseipdb_client",
-            operation="enrich unique source IPs with live or mocked results",
+            operation="enrich unique source IPs with AbuseIPDB reputation",
             outcome=(
-                TraceOutcome.COMPLETED
-                if live_count
-                else TraceOutcome.SKIPPED
+                TraceOutcome.FAILED
+                if abuse_failure_count
+                else (
+                    TraceOutcome.COMPLETED
+                    if abuse_live_count
+                    else TraceOutcome.SKIPPED
+                )
             ),
-            evidence_ids=intel_evidence_ids,
+            evidence_ids=abuse_evidence_ids,
             details={
                 "unique_ip_count": len(threat_intelligence),
-                "live_result_count": live_count,
-                "mock_result_count": mock_count,
+                "live_result_count": abuse_live_count,
+                "mock_result_count": abuse_mock_count,
+                "failed_result_count": abuse_failure_count,
             },
         ),
         DecisionTraceEntry(
             sequence=4,
+            stage=TraceStage.ENRICHMENT,
+            component="greynoise_client",
+            operation="classify unique source IPv4 addresses with GreyNoise",
+            outcome=(
+                TraceOutcome.FAILED
+                if greynoise_failure_count
+                else (
+                    TraceOutcome.COMPLETED
+                    if greynoise_live_count
+                    else TraceOutcome.SKIPPED
+                )
+            ),
+            evidence_ids=greynoise_evidence_ids,
+            details={
+                "unique_ip_count": len(greynoise_intelligence),
+                "live_result_count": greynoise_live_count,
+                "mock_result_count": greynoise_mock_count,
+                "failed_result_count": greynoise_failure_count,
+                "lookup_status_counts": greynoise_status_counts,
+                "risk_reduction_eligible_count": sum(
+                    result.risk_reduction_eligible
+                    for result in greynoise_intelligence
+                ),
+                "malicious_noise_override_count": sum(
+                    result.noise
+                    and result.classification
+                    == GreyNoiseClassification.MALICIOUS
+                    for result in greynoise_intelligence
+                ),
+            },
+        ),
+        DecisionTraceEntry(
+            sequence=5,
             stage=TraceStage.TRIAGE,
             component="report_builder",
             operation="aggregate validated findings into an incident report",
@@ -345,12 +502,13 @@ def _build_report(
         mitre_attack_mappings=_aggregate_mitre_mappings(findings),
         decision_trace=report_trace,
         threat_intelligence=threat_intelligence,
+        greynoise_intelligence=greynoise_intelligence,
         offline_mode=offline,
         metadata={
             "input_file": str(log_path),
             "log_format": str(log_format),
             "detectors": ["sqli", "weak_tls"],
-            "threat_intel_provider": "AbuseIPDB",
+            "threat_intel_providers": ["AbuseIPDB", "GreyNoise"],
         },
     )
 
@@ -362,6 +520,7 @@ async def analyze_file(
     offline: bool = False,
     env_file: str | Path = ".env",
     intel_client: AbuseIPDBClient | None = None,
+    greynoise_client: GreyNoiseClient | None = None,
 ) -> IncidentReport:
     """Analyze one log file and return a fully validated incident report."""
 
@@ -375,36 +534,48 @@ async def analyze_file(
             events=events,
             findings=[],
             threat_intelligence=[],
+            greynoise_intelligence=[],
         )
 
-    if offline:
-        async with AbuseIPDBClient(
-            offline=True,
-            mock_score=(
-                intel_client.mock_score if intel_client is not None else 0
-            ),
-        ) as client:
-            findings, intel_results = await _enrich_findings(
-                events,
-                findings,
-                client,
+    async with AsyncExitStack() as stack:
+        if offline:
+            selected_abuse_client = await stack.enter_async_context(
+                AbuseIPDBClient(
+                    offline=True,
+                    mock_score=(
+                        intel_client.mock_score
+                        if intel_client is not None
+                        else 0
+                    ),
+                )
             )
-    elif intel_client is not None:
-        findings, intel_results = await _enrich_findings(
+            selected_greynoise_client = await stack.enter_async_context(
+                GreyNoiseClient(offline=True)
+            )
+        else:
+            selected_abuse_client = intel_client
+            if selected_abuse_client is None:
+                selected_abuse_client = await stack.enter_async_context(
+                    AbuseIPDBClient.from_env(
+                        env_file=env_file,
+                        offline=False,
+                    )
+                )
+            selected_greynoise_client = greynoise_client
+            if selected_greynoise_client is None:
+                selected_greynoise_client = await stack.enter_async_context(
+                    GreyNoiseClient.from_env(
+                        env_file=env_file,
+                        offline=False,
+                    )
+                )
+
+        findings, intel_results, greynoise_results = await _enrich_findings(
             events,
             findings,
-            intel_client,
+            selected_abuse_client,
+            selected_greynoise_client,
         )
-    else:
-        async with AbuseIPDBClient.from_env(
-            env_file=env_file,
-            offline=False,
-        ) as client:
-            findings, intel_results = await _enrich_findings(
-                events,
-                findings,
-                client,
-            )
 
     return _build_report(
         log_path,
@@ -413,6 +584,7 @@ async def analyze_file(
         events=events,
         findings=findings,
         threat_intelligence=intel_results,
+        greynoise_intelligence=greynoise_results,
     )
 
 

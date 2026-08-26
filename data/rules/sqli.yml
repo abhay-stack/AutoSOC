@@ -1,0 +1,44 @@
+title: SQL Injection in Web Request Payload
+id: 9adfbc36-6d3d-4e8b-b0d7-483313b12f74
+status: stable
+description: >-
+  Detects high-specificity UNION SELECT and boolean-inference SQL injection
+  syntax in normalized web request targets or request bodies. A match indicates
+  an attempted exploit and does not prove successful compromise.
+author: AutoSOC
+date: 2026-08-27
+modified: 2026-08-27
+tags:
+  - attack.initial-access
+  - attack.t1190
+logsource:
+  category: webserver
+  product: autosoc
+  service: web_access
+detection:
+  selection_union_target:
+    url.original|re|i: '\bUNION(?:\s|/\*[^*]{0,64}\*/)+(?:ALL(?:\s|/\*[^*]{0,64}\*/)+)?SELECT\b'
+  selection_union_body:
+    http.request.body.content|re|i: '\bUNION(?:\s|/\*[^*]{0,64}\*/)+(?:ALL(?:\s|/\*[^*]{0,64}\*/)+)?SELECT\b'
+  selection_boolean_target:
+    url.original|re|i: '(?<![A-Za-z0-9_])(?:OR|AND)\b\s*\(?\s*(?:-?\d+|''[^''\r\n]{0,64}''|"[^"\r\n]{0,64}")\s*(?:=|!=|<>|<=|>=|<|>)\s*(?:-?\d+|''[^''\r\n]{0,64}''|"[^"\r\n]{0,64}")'
+  selection_boolean_body:
+    http.request.body.content|re|i: '(?<![A-Za-z0-9_])(?:OR|AND)\b\s*\(?\s*(?:-?\d+|''[^''\r\n]{0,64}''|"[^"\r\n]{0,64}")\s*(?:=|!=|<>|<=|>=|<|>)\s*(?:-?\d+|''[^''\r\n]{0,64}''|"[^"\r\n]{0,64}")'
+  condition: 1 of selection_*
+falsepositives:
+  - Authorized penetration tests that deliberately exercise SQL injection controls
+level: high
+autosoc:
+  rule_id: SIGMA.SQLI.WEB_REQUEST
+  rule_version: 1.0.0
+  category: sql_injection
+  confidence: 0.96
+  confidence_basis: >-
+    A high-specificity SQL grammar pattern matched an explicit request payload
+    field after bounded URL decoding; no AI inference contributes to the result.
+  event_types:
+    - web_access
+  recommended_actions:
+    - Preserve the source request and correlated application logs.
+    - Review parameterized-query controls for the targeted endpoint.
+    - Block a confirmed malicious source only after analyst approval.

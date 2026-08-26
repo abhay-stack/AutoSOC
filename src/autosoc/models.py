@@ -7,8 +7,9 @@ for private model reasoning or an LLM chain of thought.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
+from ipaddress import IPv4Address
 from typing import Literal, Self
 from uuid import UUID, uuid4
 
@@ -116,6 +117,22 @@ class TraceOutcome(StrEnum):
 class ThreatIntelMode(StrEnum):
     LIVE = "live"
     MOCK = "mock"
+
+
+class GreyNoiseClassification(StrEnum):
+    BENIGN = "benign"
+    UNKNOWN = "unknown"
+    MALICIOUS = "malicious"
+
+
+class GreyNoiseLookupStatus(StrEnum):
+    MATCHED = "matched"
+    NOT_FOUND = "not_found"
+    OFFLINE = "offline"
+    NON_GLOBAL = "non_global"
+    INVALID = "invalid"
+    MISSING_KEY = "missing_key"
+    PROVIDER_ERROR = "provider_error"
 
 
 class Evidence(AutoSOCModel):
@@ -229,6 +246,113 @@ class ThreatIntelResult(AutoSOCModel):
         if self.mode == ThreatIntelMode.LIVE and self.ip_address is None:
             raise ValueError("live threat intelligence must identify the queried IP")
         return self
+
+
+class GreyNoiseResult(AutoSOCModel):
+    """GreyNoise Community context with explicit authority and lookup status."""
+
+    provider: Literal["GreyNoise"] = "GreyNoise"
+    ip_address: IPvAnyAddress | None = None
+    noise: bool = False
+    riot: bool = False
+    classification: GreyNoiseClassification | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    link: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        pattern=r"^https://viz\.greynoise\.io/",
+    )
+    last_seen: date | None = None
+    message: str | None = Field(default=None, min_length=1, max_length=1000)
+    mode: ThreatIntelMode
+    lookup_status: GreyNoiseLookupStatus
+    retrieval_reason: str = Field(min_length=1, max_length=500)
+    checked_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("checked_at")
+    @classmethod
+    def normalise_checked_at(cls, value: datetime) -> datetime:
+        return _normalise_timestamp(value)
+
+    @model_validator(mode="after")
+    def validate_authority_and_status(self) -> Self:
+        live_statuses = {
+            GreyNoiseLookupStatus.MATCHED,
+            GreyNoiseLookupStatus.NOT_FOUND,
+        }
+        if self.mode == ThreatIntelMode.LIVE:
+            if self.ip_address is None:
+                raise ValueError("live GreyNoise intelligence requires an IP")
+            if self.lookup_status not in live_statuses:
+                raise ValueError("live GreyNoise intelligence requires a live status")
+            if not (
+                isinstance(self.ip_address, IPv4Address)
+                and self.ip_address.is_global
+                and not self.ip_address.is_multicast
+                and not self.ip_address.is_unspecified
+                and not self.ip_address.is_loopback
+                and not self.ip_address.is_link_local
+                and not self.ip_address.is_reserved
+                and not self.ip_address.is_private
+            ):
+                raise ValueError(
+                    "live GreyNoise intelligence requires a globally routable IPv4"
+                )
+        elif self.lookup_status in live_statuses:
+            raise ValueError("mock GreyNoise intelligence cannot claim a live status")
+
+        if self.mode == ThreatIntelMode.MOCK and any(
+            (
+                self.noise,
+                self.riot,
+                self.classification is not None,
+                self.name is not None,
+                self.link is not None,
+                self.last_seen is not None,
+                self.message is not None,
+            )
+        ):
+            raise ValueError(
+                "mock GreyNoise intelligence cannot contain provider claims"
+            )
+        if self.lookup_status == GreyNoiseLookupStatus.MATCHED:
+            if self.classification is None:
+                raise ValueError(
+                    "matched GreyNoise intelligence requires a classification"
+                )
+            if not (self.noise or self.riot):
+                raise ValueError(
+                    "matched GreyNoise intelligence requires noise or RIOT context"
+                )
+        if self.lookup_status == GreyNoiseLookupStatus.NOT_FOUND and (
+            self.noise
+            or self.riot
+            or self.classification is not None
+            or self.name is not None
+            or self.link is not None
+            or self.last_seen is not None
+        ):
+            raise ValueError(
+                "not-found GreyNoise intelligence cannot contain matched context"
+            )
+        return self
+
+    @property
+    def risk_reduction_eligible(self) -> bool:
+        """Return whether authoritative context identifies background traffic."""
+
+        if (
+            self.mode != ThreatIntelMode.LIVE
+            or self.lookup_status != GreyNoiseLookupStatus.MATCHED
+        ):
+            return False
+        if self.classification == GreyNoiseClassification.BENIGN:
+            return True
+        return (
+            self.noise
+            and self.classification == GreyNoiseClassification.UNKNOWN
+        )
 
 
 class SecurityEvent(AutoSOCModel):
@@ -362,6 +486,7 @@ class IncidentReport(AutoSOCModel):
     mitre_attack_mappings: list[MitreAttackMapping]
     decision_trace: list[DecisionTraceEntry] = Field(min_length=1)
     threat_intelligence: list[ThreatIntelResult] = Field(default_factory=list)
+    greynoise_intelligence: list[GreyNoiseResult] = Field(default_factory=list)
     containment_recommendations: list[ContainmentRecommendation] = Field(
         default_factory=list
     )
@@ -379,7 +504,10 @@ class IncidentReport(AutoSOCModel):
     def validate_report_integrity(self) -> Self:
         if self.offline_mode and any(
             result.mode == ThreatIntelMode.LIVE
-            for result in self.threat_intelligence
+            for result in [
+                *self.threat_intelligence,
+                *self.greynoise_intelligence,
+            ]
         ):
             raise ValueError(
                 "offline reports cannot contain live threat-intelligence results"
@@ -464,6 +592,9 @@ __all__ = [
     "DetectionFinding",
     "Evidence",
     "EventType",
+    "GreyNoiseClassification",
+    "GreyNoiseLookupStatus",
+    "GreyNoiseResult",
     "IncidentReport",
     "IncidentStatus",
     "MitreAttackMapping",

@@ -38,6 +38,9 @@ dist/
 *.egg-info/
 .eggs/
 
+# Generated SOAR artifacts (contain local incident targets and approval metadata)
+data/remediation/
+
 # Documentation builds
 site/
 
